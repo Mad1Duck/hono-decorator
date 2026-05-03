@@ -20,16 +20,12 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 ## Install
 
 ```bash
-npm install hono-forge
+npm install hono-forge hono zod
 # or
-bun add hono-forge
+bun add hono-forge hono zod
 ```
 
-### Peer dependencies
-
-```bash
-npm install hono zod reflect-metadata
-```
+> `reflect-metadata` is bundled as a direct dependency — no separate install needed.
 
 ### TypeScript setup
 
