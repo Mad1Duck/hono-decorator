@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import { ZodError } from 'zod';
 
 import { container } from './container';
@@ -17,10 +18,14 @@ import type { AbstractConstructor, ConcreteConstructor, ControllerInstance } fro
 
 /* ================= TYPES ================= */
 
-type HonoMethod = (
-  path: string,
-  ...handlers: HonoMiddlewareFn[]
-) => void;
+type WebSocketFactory = (c: Context) => unknown | Promise<unknown>;
+
+/**
+ * Platform-specific WebSocket upgrader (e.g. `upgradeWebSocket` from `hono/bun`).
+ * Receives a factory that maps the request context to WebSocket event handlers,
+ * and returns a Hono middleware that performs the upgrade.
+ */
+export type WebSocketUpgrader = (factory: WebSocketFactory) => HonoMiddlewareFn;
 
 /**
  * Function that executes a list of guards against the current request context.
@@ -65,6 +70,16 @@ export interface RouteBuilderConfig {
    * Factory for per-route rate limiting. Required if you use @RateLimit() decorator.
    */
   rateLimiterFactory?: RateLimiterFactory;
+
+  /**
+   * Platform-specific WebSocket upgrader. Required if you use @WebSocket() decorator.
+   * Pass `upgradeWebSocket` from `hono/bun`, `hono/cloudflare-workers`, etc.
+   *
+   * @example
+   * import { upgradeWebSocket } from 'hono/bun';
+   * HonoRouteBuilder.configure({ webSocketUpgrader: upgradeWebSocket });
+   */
+  webSocketUpgrader?: WebSocketUpgrader;
 }
 
 /* ================= ROUTE BUILDER (HONO) ================= */
@@ -161,13 +176,11 @@ export class HonoRouteBuilder {
         proto.constructor
       ) as HonoMiddlewareFn[] | undefined) ?? [];
 
-    const methodMiddlewares = isPublic
-      ? []
-      : (Reflect.getMetadata(
-        METADATA_KEYS.MIDDLEWARES,
-        proto,
-        handlerName
-      ) as HonoMiddlewareFn[] | undefined) ?? [];
+    const methodMiddlewares = (Reflect.getMetadata(
+      METADATA_KEYS.MIDDLEWARES,
+      proto,
+      handlerName
+    ) as HonoMiddlewareFn[] | undefined) ?? [];
 
     /* ----- Get Parameter Metadata ----- */
     const params = (Reflect.getMetadata(
@@ -189,8 +202,17 @@ export class HonoRouteBuilder {
     // 2. Method-level middlewares
     middlewares.push(...methodMiddlewares);
 
+    const routeLabel = `${method.toUpperCase()} ${basePath}${path}`;
+
     // 3. Rate limiting middleware (if decorator is present)
-    if (rateLimitMeta && this.config.rateLimiterFactory) {
+    if (rateLimitMeta) {
+      if (!this.config.rateLimiterFactory) {
+        throw new Error(
+          `[hono-decorators] Route "${routeLabel}" has @RateLimit but no rateLimiterFactory is configured.\n` +
+          `Call HonoRouteBuilder.configure({ rateLimiterFactory }) before building routes.`
+        );
+      }
+
       const rateLimitMiddleware = this.config.rateLimiterFactory({
         max: rateLimitMeta.max,
         windowMs: rateLimitMeta.windowMs,
@@ -203,7 +225,15 @@ export class HonoRouteBuilder {
     }
 
     // 4. Guards middleware (auth, role, permission)
-    if (guards.length > 0 && this.config.guardExecutor) {
+    if (guards.length > 0) {
+      if (!this.config.guardExecutor) {
+        const guardNames = guards.map(g => g.name).join(', ');
+        throw new Error(
+          `[hono-decorators] Route "${routeLabel}" has guards [${guardNames}] but no guardExecutor is configured.\n` +
+          `Call HonoRouteBuilder.configure({ guardExecutor }) before building routes.`
+        );
+      }
+
       const boundExecuteGuards = this.config.guardExecutor;
       const guardMiddleware = async (c: Context, next: () => void) => {
         try {
@@ -257,72 +287,106 @@ export class HonoRouteBuilder {
       };
       middlewares.push(guardMiddleware as HonoMiddlewareFn);
     }
-    /* ----- Register Route with Middlewares ----- */
-    (app[method] as HonoMethod)(
-      `${basePath}${path}`,
-      ...middlewares,
-      async (c: Context) => {
-        try {
-          // Inject context into controller instance
-          (controllerInstance as Record<string, unknown>)['__ctx'] = c;
+    const fullPath = `${basePath}${path}`;
 
-          // Resolve parameters from request
-          const args = await this.resolveParameters(params, c);
+    // Escape hatch: Hono's generic types can't infer spread middleware arrays,
+    // so we use a plain function reference that matches the underlying API.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const honoApp = app as any;
+    const register = (m: string, ...handlers: HonoMiddlewareFn[]) =>
+      honoApp.on(m.toUpperCase(), fullPath, ...handlers) as void;
 
-          // Get handler function
+    /* ----- SSE Route ----- */
+    const isSse = Reflect.getMetadata(
+      METADATA_KEYS.SSE_ROUTE, proto, handlerName
+    ) as boolean | undefined;
+
+    if (isSse) {
+      register('GET', ...middlewares, ((c: Context) => {
+        return streamSSE(c, async (stream) => {
+          const args = await this.resolveParameters(params, c, stream);
           const fn = controllerInstance[handlerName];
+          if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
+          await fn.apply(controllerInstance, args);
+        });
+      }) as unknown as HonoMiddlewareFn);
+      return;
+    }
 
-          if (typeof fn !== 'function') {
-            throw new Error(`Handler ${handlerName} not found`);
-          }
+    /* ----- WebSocket Route ----- */
+    const isWs = Reflect.getMetadata(
+      METADATA_KEYS.WEBSOCKET_ROUTE, proto, handlerName
+    ) as boolean | undefined;
 
-          // Execute handler
-          const result = await fn.apply(controllerInstance, args);
-
-          // Clean up context
-          delete (controllerInstance as Record<string, unknown>)['__ctx'];
-
-          // Return response
-          if (result !== undefined) {
-            return c.json(result);
-          }
-
-          return c.body(null);
-        } catch (error: unknown) {
-          // Clean up context on error
-          delete (controllerInstance as Record<string, unknown>)['__ctx'];
-
-          // Handle validation errors
-          if (error instanceof ZodError) {
-            return c.json(
-              {
-                status: 'error',
-                error: {
-                  code: 'VALIDATION_ERROR',
-                  message: 'Validation failed',
-                  details: error.issues,
-                },
-              },
-              400
-            );
-          }
-
-          // Re-throw other errors (handled by global error handler)
-          throw error;
-        }
+    if (isWs) {
+      if (!this.config.webSocketUpgrader) {
+        throw new Error(
+          `[hono-decorators] Route "${routeLabel}" has @WebSocket but no webSocketUpgrader is configured.\n` +
+          `Call HonoRouteBuilder.configure({ webSocketUpgrader }) before building routes.`
+        );
       }
-    );
+      const upgrader = this.config.webSocketUpgrader;
+      const wsHandler = upgrader(async (c: Context) => {
+        const args = await this.resolveParameters(params, c);
+        const fn = controllerInstance[handlerName];
+        if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
+        return fn.apply(controllerInstance, args);
+      });
+      register('GET', ...middlewares, wsHandler);
+      return;
+    }
+
+    /* ----- Standard HTTP Route ----- */
+    const httpHandler = async (c: Context) => {
+      try {
+        (controllerInstance as Record<string, unknown>)['__ctx'] = c;
+        const args = await this.resolveParameters(params, c);
+        const fn = controllerInstance[handlerName];
+
+        if (typeof fn !== 'function') {
+          throw new Error(`Handler ${handlerName} not found`);
+        }
+
+        const result = await fn.apply(controllerInstance, args);
+        delete (controllerInstance as Record<string, unknown>)['__ctx'];
+
+        if (result !== undefined) {
+          return c.json(result);
+        }
+        return c.body(null);
+      } catch (error: unknown) {
+        delete (controllerInstance as Record<string, unknown>)['__ctx'];
+
+        if (error instanceof ZodError) {
+          return c.json(
+            {
+              status: 'error',
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'Validation failed',
+                details: error.issues,
+              },
+            },
+            400
+          );
+        }
+
+        throw error;
+      }
+    };
+
+    register(method, ...middlewares, httpHandler);
   }
 
   /* ---------- PARAM RESOLVER ---------- */
 
   private static async resolveParameters(
     params: ParamMetadata[],
-    c: Context
+    c: Context,
+    sseStream?: unknown
   ): Promise<unknown[]> {
     const args: unknown[] = [];
 
-    // Initialize array with undefined values
     params
       .sort((a, b) => a.index - b.index)
       .forEach((p) => {
@@ -377,8 +441,12 @@ export class HonoRouteBuilder {
         }
 
         case 'next': {
-          // Not typically used in controller handlers
           value = undefined;
+          break;
+        }
+
+        case 'sse': {
+          value = sseStream;
           break;
         }
 

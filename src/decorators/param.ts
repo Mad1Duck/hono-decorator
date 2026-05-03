@@ -89,6 +89,9 @@ export const Res =
 export const Next =
   createParamDecorator('next');
 
+export const SseStream =
+  createParamDecorator('sse');
+
 /* ================= VALIDATED (INFERRED) ================= */
 
 /**

@@ -21,7 +21,7 @@ export function Controller(
     const version = options?.version ?? 'v1';
 
     const fullPath = platform
-      ? `${platform}/${version}${basePath}`
+      ? `/${platform}/${version}${basePath}`
       : basePath;
 
     const metadata: ControllerMetadata = {
@@ -91,3 +91,6 @@ export const Post = createRouteDecorator('post');
 export const Put = createRouteDecorator('put');
 export const Patch = createRouteDecorator('patch');
 export const Delete = createRouteDecorator('delete');
+export const Head = createRouteDecorator('head');
+export const Options = createRouteDecorator('options');
+export const All = createRouteDecorator('all');

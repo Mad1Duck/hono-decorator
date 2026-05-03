@@ -46,6 +46,10 @@ Import `reflect-metadata` once at your app entry point:
 import 'reflect-metadata';
 ```
 
+> **Note:** This package uses **legacy TypeScript decorators** (`experimentalDecorators: true`), not the TC39 Stage 3 decorators introduced in TypeScript 5.x. They are different and not compatible with each other.
+
+> **Bundler note:** If you use esbuild or Vite, `emitDecoratorMetadata` requires [`@swc/core`](https://swc.rs/) or [`babel-plugin-transform-typescript`](https://babeljs.io/docs/babel-plugin-transform-typescript) to work correctly. With `tsc` or `ts-node` it works out of the box.
+
 ---
 
 ## Quick start
@@ -247,6 +251,8 @@ getOne(@ValidatedParam('id', z.string().uuid()) id: string) {}
 ## Guards
 
 Guards run before the route handler. Configure your executor once at app startup — this keeps the package free of JWT or auth library dependencies.
+
+> **Important:** If any route uses a guard decorator (`@RequireAuth`, `@RequireRole`, etc.) but `guardExecutor` is not configured, `HonoRouteBuilder.build()` will throw immediately at startup with a descriptive error. Same applies to `@RateLimit` without `rateLimiterFactory`. This is intentional — silent skipping of security checks is a footgun.
 
 ### Setup
 

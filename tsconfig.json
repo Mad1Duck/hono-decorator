@@ -7,6 +7,8 @@
     "verbatimModuleSyntax": true,
     "allowJs": true,
 
+    "types": ["bun-types"],
+
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
 
@@ -20,10 +22,9 @@
 
     "noEmit": true,
 
-    "rootDir": "./src",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src"]
+  "include": ["src", "tests"]
 }

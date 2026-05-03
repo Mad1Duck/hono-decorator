@@ -129,14 +129,20 @@ export class Container {
     // Check factory
     const factory = this.factories.get(target);
     if (factory !== undefined) {
-      const instance = factory() as T;
+      this.resolutionStack.push(targetName);
+      try {
+        const instance = factory() as T;
+        this.resolutionStack.pop();
 
-      // Cache if marked as singleton
-      if (this.isSingleton(target)) {
-        this.singletons.set(target, instance);
+        if (this.isSingleton(target)) {
+          this.singletons.set(target, instance);
+        }
+
+        return instance;
+      } catch (error) {
+        this.resolutionStack.pop();
+        throw error;
       }
-
-      return instance;
     }
 
     // Resolve via constructor injection
@@ -169,10 +175,15 @@ export class Container {
       // Get constructor parameter types from metadata
       const paramTypes = this.getParamTypes(target);
 
+      // Check for @Inject overrides (string/symbol tokens)
+      const injectTokens: InjectionToken[] =
+        (Reflect.getMetadata('inject:tokens', target) as InjectionToken[] | undefined) ?? [];
+
       // Resolve each dependency
       const dependencies = paramTypes.map((paramType, index) => {
+        const token = injectTokens[index] ?? paramType;
         try {
-          return this.resolve(paramType);
+          return this.resolve(token as ConcreteConstructor);
         } catch (error) {
           throw new DependencyResolutionError(
             paramType,

@@ -17,12 +17,14 @@ export const METADATA_KEYS = {
   RATE_LIMIT: Symbol('rateLimit'),
   OPENAPI: Symbol('openapi'),
   CUSTOM: Symbol('custom'),
+  SSE_ROUTE: Symbol('sseRoute'),
+  WEBSOCKET_ROUTE: Symbol('websocketRoute'),
 } as const;
 
 /* ================= ROUTE ================= */
 
 export interface RouteMetadata {
-  method: 'get' | 'post' | 'put' | 'patch' | 'delete';
+  method: 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options' | 'all';
   path: string;
   handlerName: string;
   platform?: 'mobile' | 'web' | 'all';
@@ -48,7 +50,8 @@ export interface ParamMetadata {
   | 'user'
   | 'req'
   | 'res'
-  | 'next';
+  | 'next'
+  | 'sse';
 
   index: number;
   name?: string;
