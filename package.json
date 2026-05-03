@@ -1,0 +1,46 @@
+{
+  "name": "hono-decorators",
+  "version": "0.1.0",
+  "description": "NestJS-style decorators for Hono — DI container, routing, guards, validation, and more.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "hono",
+    "decorator",
+    "typescript",
+    "dependency-injection",
+    "controller",
+    "guard",
+    "middleware"
+  ],
+  "peerDependencies": {
+    "hono": ">=4",
+    "reflect-metadata": ">=0.2",
+    "zod": ">=3"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "hono": "^4.12.16",
+    "reflect-metadata": "^0.2.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.5.0",
+    "zod": "^4.4.2"
+  }
+}
