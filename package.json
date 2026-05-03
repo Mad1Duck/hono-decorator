@@ -1,7 +1,7 @@
 {
-  "name": "hono-decorators",
+  "name": "hono-forge",
   "version": "0.1.0",
-  "description": "NestJS-style decorators for Hono — DI container, routing, guards, validation, and more.",
+  "description": "NestJS-style decorators for Hono — DI container, routing, guards, SSE, WebSocket, channels, OpenAPI, and more.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -14,7 +14,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "license": "MIT",
   "scripts": {
@@ -27,12 +29,19 @@
   },
   "keywords": [
     "hono",
+    "hono-forge",
     "decorator",
     "typescript",
     "dependency-injection",
     "controller",
     "guard",
-    "middleware"
+    "middleware",
+    "sse",
+    "websocket",
+    "openapi",
+    "channels",
+    "bun",
+    "edge"
   ],
   "peerDependencies": {
     "hono": ">=4",

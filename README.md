@@ -1,6 +1,6 @@
-# hono-decorators
+# hono-forge
 
-NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dependency injection, guards, SSE, WebSocket, channels, and more.
+NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dependency injection, guards, SSE, WebSocket, channels, OpenAPI, and more.
 
 ## Features
 
@@ -20,9 +20,9 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 ## Install
 
 ```bash
-npm install hono-decorators
+npm install hono-forge
 # or
-bun add hono-decorators
+bun add hono-forge
 ```
 
 ### Peer dependencies
@@ -62,7 +62,7 @@ import { Hono } from 'hono';
 import {
   Controller, Get, Post, Body, Param,
   Injectable, HonoRouteBuilder,
-} from 'hono-decorators';
+} from 'hono-forge';
 import { z } from 'zod';
 
 const CreateUserSchema = z.object({ name: z.string(), email: z.string().email() });
@@ -347,12 +347,12 @@ A shared registry for broadcasting events to SSE and WebSocket clients — in-me
 ### Setup
 
 ```ts
-import { channels } from 'hono-decorators';
+import { channels } from 'hono-forge';
 
 // default: in-memory, nothing to configure
 
 // multi-instance: swap to Redis
-import { RedisChannelAdapter } from 'hono-decorators';
+import { RedisChannelAdapter } from 'hono-forge';
 import Redis from 'ioredis';
 channels.use(new RedisChannelAdapter(new Redis(), new Redis()));
 ```
@@ -360,7 +360,7 @@ channels.use(new RedisChannelAdapter(new Redis(), new Redis()));
 ### SSE with user-specific channels
 
 ```ts
-import { channels, SseChannelClient } from 'hono-decorators';
+import { channels, SseChannelClient } from 'hono-forge';
 import type { SSEStreamingApi } from 'hono/streaming';
 
 @Controller('/events')
@@ -389,7 +389,7 @@ await channels.publish(`user:${userId}`, 'order.created', { id: 123 });
 ### WebSocket with room channels
 
 ```ts
-import { channels, WsChannelClient } from 'hono-decorators';
+import { channels, WsChannelClient } from 'hono-forge';
 
 @Controller('/ws')
 class ChatController {
@@ -508,7 +508,7 @@ import {
   Injectable, Singleton,
   HonoRouteBuilder, container,
   channels, SseChannelClient,
-} from 'hono-decorators';
+} from 'hono-forge';
 import type { SSEStreamingApi } from 'hono/streaming';
 
 @Injectable()
