@@ -51,7 +51,10 @@ export interface ParamMetadata {
   | 'req'
   | 'res'
   | 'next'
-  | 'sse';
+  | 'sse'
+  | 'ip'
+  | 'device'
+  | 'useragent';
 
   index: number;
   name?: string;

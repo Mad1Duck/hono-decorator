@@ -117,7 +117,7 @@ describe('Container', () => {
   it('registerSingleton works with string token', () => {
     const value = { config: true };
     c.registerSingleton('MY_TOKEN', value);
-    expect(c.resolve('MY_TOKEN' as never)).toBe(value);
+    expect(c.resolve('MY_TOKEN' as never) as typeof value).toBe(value);
   });
 
   /* -------- registerFactory -------- */

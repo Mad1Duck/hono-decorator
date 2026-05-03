@@ -7,6 +7,12 @@ import { ZodError } from 'zod';
 
 import { container } from './container';
 import { METADATA_KEYS } from '../decorators/metadata';
+import {
+  extractIp,
+  detectDevice,
+  extractUserAgent,
+} from '../utils/request';
+import type { RequestLogger, RequestLogEntry } from '../utils/request';
 import type {
   RouteMetadata,
   ParamMetadata,
@@ -17,6 +23,20 @@ import type {
 import type { AbstractConstructor, ConcreteConstructor, ControllerInstance } from './types';
 
 /* ================= TYPES ================= */
+
+/**
+ * Global error handler for unhandled route errors.
+ * Return a Response to send to the client; re-throw to let Hono handle it.
+ *
+ * @example
+ * HonoRouteBuilder.configure({
+ *   onError: (err, c) => {
+ *     console.error(err);
+ *     return c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500);
+ *   },
+ * });
+ */
+export type ErrorHandler = (error: unknown, c: Context) => Response | Promise<Response>;
 
 type WebSocketFactory = (c: Context) => unknown | Promise<unknown>;
 
@@ -80,7 +100,34 @@ export interface RouteBuilderConfig {
    * HonoRouteBuilder.configure({ webSocketUpgrader: upgradeWebSocket });
    */
   webSocketUpgrader?: WebSocketUpgrader;
+
+  /**
+   * Pluggable request logger. Called after every standard HTTP handler with
+   * method, path, IP, device type, user-agent, status code, and duration.
+   *
+   * @example
+   * HonoRouteBuilder.configure({
+   *   requestLogger: (e) => console.log(JSON.stringify(e)),
+   * });
+   */
+  requestLogger?: RequestLogger;
+
+  /**
+   * Global error handler for unhandled route errors (non-validation errors).
+   * If omitted, unhandled errors are re-thrown to Hono's default 500 handler.
+   *
+   * @example
+   * HonoRouteBuilder.configure({
+   *   onError: (err, c) => {
+   *     console.error(err);
+   *     return c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500);
+   *   },
+   * });
+   */
+  onError?: ErrorHandler;
 }
+
+export type { RequestLogger, RequestLogEntry };
 
 /* ================= ROUTE BUILDER (HONO) ================= */
 
@@ -337,7 +384,12 @@ export class HonoRouteBuilder {
     }
 
     /* ----- Standard HTTP Route ----- */
+    const requestLogger = this.config.requestLogger;
+    const onError = this.config.onError;
     const httpHandler = async (c: Context) => {
+      const startMs = Date.now();
+      let response: Response;
+
       try {
         (controllerInstance as Record<string, unknown>)['__ctx'] = c;
         const args = await this.resolveParameters(params, c);
@@ -350,15 +402,12 @@ export class HonoRouteBuilder {
         const result = await fn.apply(controllerInstance, args);
         delete (controllerInstance as Record<string, unknown>)['__ctx'];
 
-        if (result !== undefined) {
-          return c.json(result);
-        }
-        return c.body(null);
+        response = result !== undefined ? c.json(result) : c.body(null);
       } catch (error: unknown) {
         delete (controllerInstance as Record<string, unknown>)['__ctx'];
 
         if (error instanceof ZodError) {
-          return c.json(
+          response = c.json(
             {
               status: 'error',
               error: {
@@ -369,13 +418,35 @@ export class HonoRouteBuilder {
             },
             400
           );
+        } else if (onError) {
+          response = await onError(error, c);
+        } else {
+          throw error;
         }
-
-        throw error;
       }
+
+      if (requestLogger) {
+        const ua = extractUserAgent(c);
+        const entry: RequestLogEntry = {
+          method: c.req.method,
+          path: c.req.path,
+          ip: extractIp(c),
+          device: detectDevice(ua),
+          userAgent: ua,
+          statusCode: response.status,
+          durationMs: Date.now() - startMs,
+          userId: (c.get('user') as { id?: string } | undefined)?.id,
+        };
+        await requestLogger(entry);
+      }
+
+      return response;
     };
 
-    register(method, ...middlewares, httpHandler);
+    // Hono doesn't route app.on('HEAD',...) — register as GET so Hono's
+    // automatic HEAD-for-GET fallback returns correct headers with no body.
+    const httpMethod = method === 'head' ? 'GET' : method;
+    register(httpMethod, ...middlewares, httpHandler);
   }
 
   /* ---------- PARAM RESOLVER ---------- */
@@ -447,6 +518,21 @@ export class HonoRouteBuilder {
 
         case 'sse': {
           value = sseStream;
+          break;
+        }
+
+        case 'ip': {
+          value = extractIp(c);
+          break;
+        }
+
+        case 'device': {
+          value = detectDevice(extractUserAgent(c));
+          break;
+        }
+
+        case 'useragent': {
+          value = extractUserAgent(c);
           break;
         }
 

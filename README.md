@@ -1,17 +1,21 @@
 # hono-decorators
 
-NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dependency injection, guards, parameter validation, and more.
+NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dependency injection, guards, SSE, WebSocket, channels, and more.
 
 ## Features
 
-- **Controller routing** — `@Controller`, `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`
-- **Dependency injection** — `@Injectable`, `@Singleton`, `@Inject`, with circular dependency detection
-- **Parameter decorators** — `@Body`, `@Query`, `@Param`, `@Headers`, `@User` with optional Zod validation
+- **Controller routing** — `@Controller`, `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Head`, `@Options`, `@All`
+- **Dependency injection** — `@Injectable`, `@Singleton`, `@Inject`, circular dependency detection
+- **Parameter decorators** — `@Body`, `@Query`, `@Param`, `@Headers`, `@User`, `@Ip`, `@Device`, `@UserAgent` with optional Zod validation
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequirePermission` with pluggable executor
-- **Middleware** — `@Middleware` for class and function-based middleware
-- **Interceptors** — `@Retry`, `@Timeout`, `@Transform`, `@TrackMetrics`, `@Cache`
-- **OpenAPI** — `@ApiDoc`, `@ApiTags`, `@ApiResponse`, `@ApiDeprecated`
-- **Utilities** — `@Throttle`, `@Memoize`, `@Audit`, `@Transaction`, `@ValidateResult`
+- **Rate limiting** — `@RateLimit` with pluggable factory
+- **Middleware** — `@Middleware` at class or method level
+- **SSE** — `@Sse`, `@SseStream` with streaming API
+- **WebSocket** — `@WebSocket` with pluggable upgrader
+- **Channels** — pub/sub for SSE and WS; in-memory default, pluggable to Redis
+- **Request logging** — pluggable `requestLogger` with IP, device, UA, duration
+- **Error handling** — pluggable `onError` for unhandled route errors
+- **Interceptors** — `@Retry`, `@Timeout`, `@Transform`, `@Cache`, `@TrackMetrics`
 
 ## Install
 
@@ -29,8 +33,6 @@ npm install hono zod reflect-metadata
 
 ### TypeScript setup
 
-Add to your `tsconfig.json`:
-
 ```json
 {
   "compilerOptions": {
@@ -46,9 +48,9 @@ Import `reflect-metadata` once at your app entry point:
 import 'reflect-metadata';
 ```
 
-> **Note:** This package uses **legacy TypeScript decorators** (`experimentalDecorators: true`), not the TC39 Stage 3 decorators introduced in TypeScript 5.x. They are different and not compatible with each other.
+> **Note:** This package uses **legacy TypeScript decorators** (`experimentalDecorators: true`), not the TC39 Stage 3 decorators. They are not compatible.
 
-> **Bundler note:** If you use esbuild or Vite, `emitDecoratorMetadata` requires [`@swc/core`](https://swc.rs/) or [`babel-plugin-transform-typescript`](https://babeljs.io/docs/babel-plugin-transform-typescript) to work correctly. With `tsc` or `ts-node` it works out of the box.
+> **Bundler note:** `emitDecoratorMetadata` requires [`@swc/core`](https://swc.rs/) with esbuild/Vite. With `tsc` or `ts-node` it works out of the box.
 
 ---
 
@@ -58,30 +60,17 @@ import 'reflect-metadata';
 import 'reflect-metadata';
 import { Hono } from 'hono';
 import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  Injectable,
-  HonoRouteBuilder,
+  Controller, Get, Post, Body, Param,
+  Injectable, HonoRouteBuilder,
 } from 'hono-decorators';
 import { z } from 'zod';
 
-const CreateUserSchema = z.object({
-  name: z.string(),
-  email: z.string().email(),
-});
+const CreateUserSchema = z.object({ name: z.string(), email: z.string().email() });
 
 @Injectable()
 class UserService {
-  getAll() {
-    return [{ id: 1, name: 'Alice' }];
-  }
-
-  create(data: { name: string; email: string }) {
-    return { id: 2, ...data };
-  }
+  getAll() { return [{ id: 1, name: 'Alice' }]; }
+  create(data: { name: string; email: string }) { return { id: 2, ...data }; }
 }
 
 @Controller('/users')
@@ -89,9 +78,7 @@ class UserController {
   constructor(private userService: UserService) {}
 
   @Get()
-  list() {
-    return this.userService.getAll();
-  }
+  list() { return this.userService.getAll(); }
 
   @Post()
   create(@Body(CreateUserSchema) body: z.infer<typeof CreateUserSchema>) {
@@ -99,14 +86,11 @@ class UserController {
   }
 
   @Get('/:id')
-  getOne(@Param('id') id: string) {
-    return { id };
-  }
+  getOne(@Param('id') id: string) { return { id }; }
 }
 
 const app = new Hono();
 app.route('/', HonoRouteBuilder.build(UserController));
-
 export default app;
 ```
 
@@ -120,43 +104,32 @@ Marks a class as injectable. Required for constructor injection.
 
 ```ts
 @Injectable()
-class EmailService {
-  send(to: string, body: string) { /* ... */ }
-}
+class EmailService { send(to: string) { /* ... */ } }
 
 @Injectable()
-class UserService {
-  constructor(private email: EmailService) {}
-}
+class UserService { constructor(private email: EmailService) {} }
 ```
 
 ### `@Singleton()`
 
-The same instance is returned on every `container.resolve()` call.
+Same instance returned on every `container.resolve()` call.
 
 ```ts
 @Injectable()
 @Singleton()
-class Database {
-  constructor() {
-    this.conn = connect(process.env.DB_URL);
-  }
-}
+class Database { constructor() { this.conn = connect(process.env.DB_URL); } }
 ```
 
 ### `@Inject(token)`
 
-Inject by string or symbol token — useful for interfaces.
+Inject by string or symbol token — useful for interfaces or values.
 
 ```ts
 const LOGGER = Symbol('LOGGER');
-
 container.registerSingleton(LOGGER, new PinoLogger());
 
 @Injectable()
-class UserService {
-  constructor(@Inject(LOGGER) private logger: Logger) {}
-}
+class UserService { constructor(@Inject(LOGGER) private logger: Logger) {} }
 ```
 
 ### Manual registration
@@ -173,15 +146,10 @@ container.registerFactory(Redis, () => new Redis(process.env.REDIS_URL));
 ### `@Controller(basePath?, options?)`
 
 ```ts
-@Controller('/users', { platform: 'web', version: 'v1' })
-// registers routes under /web/v1/users
+@Controller('/users', { platform: 'web', version: 'v2' })
+// registers routes under /web/v2/users
 class UserController {}
 ```
-
-| Option | Type | Default |
-|--------|------|---------|
-| `platform` | `'web' \| 'mobile'` | none |
-| `version` | `string` | `'v1'` |
 
 ### HTTP method decorators
 
@@ -191,16 +159,18 @@ class UserController {}
 @Put('/path')
 @Patch('/path')
 @Delete('/path')
+@Head('/path')    // registers as GET; Hono handles HEAD automatically
+@Options('/path')
+@All('/path')     // matches all HTTP methods
 ```
 
-Each accepts `{ platform?: 'web' | 'mobile' | 'all', isPrivate?: boolean }`.
+Each accepts optional `{ platform?: 'web' | 'mobile' | 'all', isPrivate?: boolean }`.
 
 ### Building routes
 
 ```ts
 const app = new Hono();
 
-// mount single controller
 app.route('/', HonoRouteBuilder.build(UserController));
 
 // filter by platform
@@ -212,15 +182,19 @@ app.route('/', HonoRouteBuilder.build(UserController, 'mobile'));
 
 ## Parameter decorators
 
-| Decorator | Source |
-|-----------|--------|
+| Decorator | Injects |
+|-----------|---------|
 | `@Body()` | `await c.req.json()` |
 | `@Query()` | `c.req.query()` |
 | `@Param(name)` | `c.req.param(name)` |
 | `@Headers(name)` | `c.req.header(name)` |
-| `@User()` | `c.get('user')` |
+| `@User()` | `c.get('user')` — set by guard |
+| `@Ip()` | Real client IP (CF-Connecting-IP → X-Real-IP → X-Forwarded-For) |
+| `@Device()` | `'mobile' \| 'tablet' \| 'desktop' \| 'bot'` |
+| `@UserAgent()` | Raw `User-Agent` header string |
 | `@Req()` | Hono `HonoRequest` |
 | `@Res()` | Hono `Context` |
+| `@SseStream()` | SSE stream (inside `@Sse` handlers) |
 
 ### With Zod validation
 
@@ -229,59 +203,31 @@ const Schema = z.object({ name: z.string(), age: z.number() });
 
 @Post()
 create(@Body(Schema) body: z.infer<typeof Schema>) {
-  // body is already validated and typed
+  // body is validated; returns 400 VALIDATION_ERROR if invalid
 }
-```
-
-### Type-safe validated decorators
-
-```ts
-@Get()
-search(@ValidatedQuery(SearchSchema) query: z.infer<typeof SearchSchema>) {}
-
-@Post()
-create(@ValidatedBody(CreateSchema) body: z.infer<typeof CreateSchema>) {}
-
-@Get('/:id')
-getOne(@ValidatedParam('id', z.string().uuid()) id: string) {}
 ```
 
 ---
 
 ## Guards
 
-Guards run before the route handler. Configure your executor once at app startup — this keeps the package free of JWT or auth library dependencies.
+Configure your executor once — no auth library is bundled.
 
-> **Important:** If any route uses a guard decorator (`@RequireAuth`, `@RequireRole`, etc.) but `guardExecutor` is not configured, `HonoRouteBuilder.build()` will throw immediately at startup with a descriptive error. Same applies to `@RateLimit` without `rateLimiterFactory`. This is intentional — silent skipping of security checks is a footgun.
-
-### Setup
+> **Security:** `HonoRouteBuilder.build()` throws at startup if a guarded route has no `guardExecutor` configured. Silent skipping is not allowed.
 
 ```ts
-import { HonoRouteBuilder } from 'hono-decorators';
-
 HonoRouteBuilder.configure({
   guardExecutor: async (c, guards) => {
     for (const guard of guards) {
       if (guard.name === 'AuthGuard') {
         const token = c.req.header('authorization')?.split(' ')[1];
         if (!token) throw new Error('Unauthorized: No token');
-        const user = verifyJwt(token); // your own JWT logic
-        c.set('user', user);
+        c.set('user', verifyJwt(token));
       }
-
       if (guard.name === 'RoleGuard') {
         const user = c.get('user') as { roles: string[] };
-        const hasRole = guard.options?.roles?.some(r => user.roles.includes(r));
-        if (!hasRole) throw new Error('Forbidden: Insufficient role');
-      }
-
-      if (guard.name === 'PermissionGuard') {
-        const user = c.get('user') as { permissions: string[] };
-        const { permissions = [], requireAll } = guard.options ?? {};
-        const check = requireAll
-          ? permissions.every(p => user.permissions.includes(p))
-          : permissions.some(p => user.permissions.includes(p));
-        if (!check) throw new Error('Forbidden: Missing permissions');
+        const ok = guard.options?.roles?.some(r => user.roles.includes(r));
+        if (!ok) throw new Error('Forbidden: Insufficient role');
       }
     }
     return true;
@@ -289,48 +235,28 @@ HonoRouteBuilder.configure({
 });
 ```
 
-> Errors thrown with `"Unauthorized"` in the message return `401`. Errors with `"Forbidden"` return `403`.
+> Errors with `"Unauthorized"` → `401`. Errors with `"Forbidden"` → `403`. Return `false` → `403`.
 
-### Usage
+### Guard decorators
 
 ```ts
-@Controller('/admin')
-class AdminController {
-  @Get()
-  @RequireAuth()
-  dashboard() { /* ... */ }
-
-  @Delete('/:id')
-  @RequireRole('admin', 'moderator')    // user needs at least ONE
-  deleteUser(@Param('id') id: string) { /* ... */ }
-
-  @Post()
-  @RequireAllRoles('admin', 'superuser') // user needs ALL
-  sensitiveAction() { /* ... */ }
-
-  @Patch('/:id')
-  @RequirePermission('users:write')      // user needs ALL listed
-  updateUser() { /* ... */ }
-
-  @Get('/report')
-  @RequireAnyPermission('reports:read', 'admin:all') // user needs ONE
-  getReport() { /* ... */ }
-
-  @Get('/public')
-  @Public()
-  publicEndpoint() { /* ... */ }
-}
+@RequireAuth()                              // AuthGuard
+@RequireRole('admin', 'mod')               // RoleGuard — needs ONE
+@RequireAllRoles('admin', 'superuser')     // RoleGuard — needs ALL
+@RequirePermission('users:read')           // PermissionGuard — needs ALL
+@RequireAnyPermission('reports:read', 'admin:all') // PermissionGuard — needs ONE
+@Public()                                  // skips guards entirely
 ```
 
-### Rate limiting
+---
+
+## Rate limiting
 
 ```ts
 HonoRouteBuilder.configure({
-  rateLimiterFactory: ({ max, windowMs, keyPrefix, message }) => {
-    return async (c, next) => {
-      // plug in your own rate limit logic (Redis, in-memory, etc.)
-      await next();
-    };
+  rateLimiterFactory: ({ max, windowMs, keyPrefix, message, keyGenerator }) => {
+    // return a Hono middleware using your own Redis/memory store
+    return async (c, next) => { await next(); };
   },
 });
 
@@ -343,29 +269,196 @@ login(@Body() body: LoginDto) { /* ... */ }
 
 ## Middleware
 
-Apply middleware at class or method level.
-
 ```ts
-const logMiddleware = async (c: Context, next: Next) => {
+const logMw = async (c: Context, next: Next) => {
   console.log(c.req.method, c.req.path);
   await next();
 };
 
-class AuthMiddleware {
-  async use(c: Context, next: Next) {
-    // parse token...
-    await next();
+@Controller('/api')
+@Middleware(logMw)           // all routes in this controller
+class ApiController {
+  @Get()
+  @Middleware(tracingMw)     // this route only
+  list() { /* ... */ }
+}
+```
+
+---
+
+## SSE (Server-Sent Events)
+
+`@Sse` registers a GET endpoint. The handler receives the stream via `@SseStream()` and writes events until the client disconnects.
+
+```ts
+import type { SSEStreamingApi } from 'hono/streaming';
+
+@Controller('/events')
+class NotificationController {
+  @Sse('/feed')
+  @Public()
+  async feed(@SseStream() stream: SSEStreamingApi) {
+    await stream.writeSSE({ event: 'connected', data: 'ok' });
+
+    // keep-alive ping every 30s
+    while (!stream.closed) {
+      await stream.sleep(30_000);
+      await stream.writeSSE({ event: 'ping', data: '' });
+    }
+  }
+}
+```
+
+---
+
+## WebSocket
+
+Requires a platform-specific upgrader — configure once at startup.
+
+```ts
+import { upgradeWebSocket } from 'hono/bun'; // or hono/cloudflare-workers, etc.
+
+HonoRouteBuilder.configure({ webSocketUpgrader: upgradeWebSocket });
+```
+
+The handler returns WebSocket event callbacks:
+
+```ts
+@Controller('/ws')
+class ChatController {
+  @WebSocket('/:room')
+  @Public()
+  chat(@Param('room') room: string) {
+    return {
+      onOpen(_event, ws) { console.log('connected to', room); },
+      onMessage(event, ws) { ws.send(`Echo: ${event.data}`); },
+      onClose() { console.log('disconnected'); },
+    };
+  }
+}
+```
+
+---
+
+## Channels (pub/sub)
+
+A shared registry for broadcasting events to SSE and WebSocket clients — in-memory by default, pluggable to Redis for multi-instance deployments.
+
+### Setup
+
+```ts
+import { channels } from 'hono-decorators';
+
+// default: in-memory, nothing to configure
+
+// multi-instance: swap to Redis
+import { RedisChannelAdapter } from 'hono-decorators';
+import Redis from 'ioredis';
+channels.use(new RedisChannelAdapter(new Redis(), new Redis()));
+```
+
+### SSE with user-specific channels
+
+```ts
+import { channels, SseChannelClient } from 'hono-decorators';
+import type { SSEStreamingApi } from 'hono/streaming';
+
+@Controller('/events')
+class EventController {
+  @Sse('/user/:userId')
+  @RequireAuth()
+  async userFeed(
+    @Param('userId') userId: string,
+    @SseStream() stream: SSEStreamingApi
+  ) {
+    const client = new SseChannelClient(userId, stream);
+    await channels.subscribe(`user:${userId}`, client);
+    stream.onAbort(() => channels.unsubscribe(`user:${userId}`, userId));
+
+    while (!stream.closed) {
+      await stream.sleep(30_000);
+      await stream.writeSSE({ event: 'ping', data: '' });
+    }
   }
 }
 
-@Controller('/api')
-@Middleware(logMiddleware)           // applies to all routes in this controller
-class ApiController {
-  @Get()
-  @Middleware(AuthMiddleware)        // applies to this route only
-  protected() { /* ... */ }
+// push from anywhere in the app:
+await channels.publish(`user:${userId}`, 'order.created', { id: 123 });
+```
+
+### WebSocket with room channels
+
+```ts
+import { channels, WsChannelClient } from 'hono-decorators';
+
+@Controller('/ws')
+class ChatController {
+  @WebSocket('/:room')
+  @Public()
+  chat(@Param('room') room: string) {
+    return {
+      onOpen: (_e, ws) => channels.subscribe(`room:${room}`, new WsChannelClient(ws.id, ws)),
+      onMessage: (e) => channels.publish(`room:${room}`, 'message', { text: e.data }),
+      onClose: (_e, ws) => channels.unsubscribe(`room:${room}`, ws.id),
+    };
+  }
 }
 ```
+
+### Channel API
+
+```ts
+channels.subscribe(channel, client)      // add a client to a channel
+channels.unsubscribe(channel, clientId)  // remove a client
+channels.publish(channel, event, data)   // broadcast to all subscribers
+channels.use(adapter)                    // swap adapter at startup
+```
+
+---
+
+## Request logging
+
+```ts
+HonoRouteBuilder.configure({
+  requestLogger: (entry) => {
+    // entry: { method, path, ip, device, userAgent, statusCode, durationMs, userId? }
+    console.log(JSON.stringify(entry));
+  },
+});
+```
+
+`ip`, `device`, and `userAgent` are also available as parameter decorators:
+
+```ts
+@Get('/info')
+info(@Ip() ip: string, @Device() device: string, @UserAgent() ua: string) {
+  return { ip, device, ua };
+}
+```
+
+IP resolution order: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` (first) → `'unknown'`.
+
+Device types: `'mobile' | 'tablet' | 'desktop' | 'bot'`.
+
+---
+
+## Error handling
+
+```ts
+HonoRouteBuilder.configure({
+  onError: (err, c) => {
+    console.error(err);
+    // optionally: Sentry.captureException(err);
+    return c.json(
+      { error: { code: 'INTERNAL_SERVER_ERROR', message: 'Something went wrong' } },
+      500
+    );
+  },
+});
+```
+
+- Validation errors (`ZodError`) always return `400` regardless of `onError`.
+- If `onError` is not configured, unhandled errors re-throw to Hono's default 500 handler.
 
 ---
 
@@ -392,15 +485,6 @@ async slowOperation() { /* ... */ }
 getUser() { /* ... */ }
 ```
 
-### `@TrackMetrics`
-
-Calls `this.metrics.trackMethodDuration(name, duration, status)` if available.
-
-```ts
-@TrackMetrics({ name: 'user.create' })
-create() { /* ... */ }
-```
-
 ### `@Cache`
 
 Stores cache metadata — integrate with your own cache layer.
@@ -412,74 +496,6 @@ getAll() { /* ... */ }
 
 ---
 
-## Utilities
-
-### `@Throttle(ms)`
-
-```ts
-@Throttle(1000)
-expensiveAction() { /* max once per second */ }
-```
-
-### `@Memoize({ ttl? })`
-
-```ts
-@Memoize({ ttl: 30_000 })
-async getConfig() { /* cached for 30s per unique args */ }
-```
-
-### `@ValidateResult(schema)`
-
-Validates the return value of a method against a Zod schema.
-
-```ts
-@ValidateResult(UserSchema)
-async getUser(id: string) { /* ... */ }
-```
-
-### `@Audit({ action })`
-
-Logs an audit entry before the method runs. Uses `this.logger.info()` if present, falls back to `console.log`.
-
-```ts
-@Audit({ action: 'USER_DELETE' })
-delete(id: string) { /* ... */ }
-```
-
-### `@Transaction()`
-
-Wraps method in a database transaction. Expects `this.db` to implement `.transaction(fn)`.
-
-```ts
-@Transaction()
-async transfer(from: string, to: string, amount: number) { /* ... */ }
-```
-
----
-
-## OpenAPI
-
-```ts
-@Controller('/users')
-@ApiTags('Users')
-class UserController {
-  @Get()
-  @ApiDoc({
-    summary: 'List all users',
-    description: 'Returns a paginated list of users',
-  })
-  @ApiResponse(200, 'Success', UserListSchema)
-  @ApiResponse(401, 'Unauthorized')
-  list() { /* ... */ }
-
-  @Delete('/:id')
-  @ApiDeprecated()
-  remove() { /* ... */ }
-}
-```
-
----
-
 ## Full example
 
 ```ts
@@ -487,74 +503,68 @@ import 'reflect-metadata';
 import { Hono } from 'hono';
 import {
   Controller, Get, Post, Delete,
-  Body, Param, User,
+  Body, Param, User, Ip, Device,
   RequireAuth, RequireRole, Public,
   Injectable, Singleton,
   HonoRouteBuilder, container,
+  channels, SseChannelClient,
 } from 'hono-decorators';
+import type { SSEStreamingApi } from 'hono/streaming';
 
 @Injectable()
 @Singleton()
-class UserRepository {
-  private users = [{ id: '1', name: 'Alice', role: 'admin' }];
-
+class UserRepo {
+  private users = [{ id: '1', name: 'Alice', roles: ['admin'] }];
   findAll() { return this.users; }
   findById(id: string) { return this.users.find(u => u.id === id); }
-  delete(id: string) { this.users = this.users.filter(u => u.id !== id); }
-}
-
-@Injectable()
-class UserService {
-  constructor(private repo: UserRepository) {}
-
-  getAll() { return this.repo.findAll(); }
-  getOne(id: string) { return this.repo.findById(id); }
-  remove(id: string) { this.repo.delete(id); }
 }
 
 @Controller('/users')
 class UserController {
-  constructor(private users: UserService) {}
+  constructor(private repo: UserRepo) {}
 
   @Get()
   @Public()
-  list() {
-    return this.users.getAll();
-  }
+  list() { return this.repo.findAll(); }
 
   @Get('/:id')
   @RequireAuth()
-  getOne(@Param('id') id: string) {
-    return this.users.getOne(id);
-  }
+  getOne(@Param('id') id: string) { return this.repo.findById(id); }
+}
 
-  @Delete('/:id')
-  @RequireRole('admin')
-  remove(@Param('id') id: string, @User() user: { name: string }) {
-    this.users.remove(id);
-    return { deleted: id, by: user.name };
+@Controller('/events')
+class EventController {
+  @Sse('/user/:userId')
+  @RequireAuth()
+  async userFeed(@Param('userId') userId: string, @SseStream() stream: SSEStreamingApi) {
+    const client = new SseChannelClient(userId, stream);
+    await channels.subscribe(`user:${userId}`, client);
+    stream.onAbort(() => channels.unsubscribe(`user:${userId}`, userId));
+    while (!stream.closed) await stream.sleep(30_000);
   }
 }
 
 HonoRouteBuilder.configure({
   guardExecutor: async (c, guards) => {
-    for (const guard of guards) {
-      if (guard.name === 'AuthGuard') {
-        const user = c.get('user');
+    for (const g of guards) {
+      if (g.name === 'AuthGuard') {
+        const user = verifyJwt(c.req.header('authorization')?.split(' ')[1] ?? '');
         if (!user) throw new Error('Unauthorized');
-      }
-      if (guard.name === 'RoleGuard') {
-        const user = c.get('user') as { role: string };
-        const ok = guard.options?.roles?.includes(user?.role);
-        if (!ok) throw new Error('Forbidden');
+        c.set('user', user);
       }
     }
     return true;
+  },
+  requestLogger: (e) => console.log(`${e.method} ${e.path} ${e.statusCode} ${e.durationMs}ms`),
+  onError: (err, c) => {
+    console.error(err);
+    return c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500);
   },
 });
 
 const app = new Hono();
 app.route('/', HonoRouteBuilder.build(UserController));
+app.route('/', HonoRouteBuilder.build(EventController));
 
 export default app;
 ```

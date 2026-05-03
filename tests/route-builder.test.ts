@@ -377,6 +377,61 @@ describe('HonoRouteBuilder', () => {
     });
   });
 
+  /* -------- onError -------- */
+
+  describe('onError', () => {
+    it('calls onError when handler throws a non-validation error', async () => {
+      @Controller('/err-test')
+      class ErrController {
+        @Get()
+        @Public()
+        boom() { throw new Error('something went wrong'); }
+      }
+
+      HonoRouteBuilder.configure({
+        onError: (_err, c) => c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500),
+      });
+
+      const app = HonoRouteBuilder.build(ErrController);
+      const res = await app.fetch(makeRequest('/err-test'));
+      expect(res.status).toBe(500);
+      const body = await res.json() as { error: { code: string } };
+      expect(body.error.code).toBe('INTERNAL_SERVER_ERROR');
+    });
+
+    it('onError receives the thrown error instance', async () => {
+      @Controller('/err-capture')
+      class ErrCaptureController {
+        @Get()
+        @Public()
+        boom() { throw new TypeError('bad type'); }
+      }
+
+      let captured: unknown;
+      HonoRouteBuilder.configure({
+        onError: (err, c) => { captured = err; return c.json({}, 500); },
+      });
+
+      const app = HonoRouteBuilder.build(ErrCaptureController);
+      await app.fetch(makeRequest('/err-capture'));
+      expect(captured).toBeInstanceOf(TypeError);
+      expect((captured as TypeError).message).toBe('bad type');
+    });
+
+    it('validation errors still return 400 even when onError is configured', async () => {
+      HonoRouteBuilder.configure({
+        onError: (_err, c) => c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500),
+      });
+      const app = HonoRouteBuilder.build(ItemController);
+      const res = await app.fetch(makeRequest('/items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '' }),
+      }));
+      expect(res.status).toBe(400);
+    });
+  });
+
   /* -------- misc -------- */
 
   describe('response', () => {

@@ -16,12 +16,14 @@
   "files": [
     "dist"
   ],
+  "license": "MIT",
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
     "test": "bun test",
-    "test:watch": "bun test --watch"
+    "test:watch": "bun test --watch",
+    "prepublishOnly": "bun run type-check && bun test && bun run build"
   },
   "keywords": [
     "hono",

@@ -92,6 +92,18 @@ export const Next =
 export const SseStream =
   createParamDecorator('sse');
 
+/** Injects the real client IP (respects CF-Connecting-IP, X-Real-IP, X-Forwarded-For). */
+export const Ip =
+  createParamDecorator('ip');
+
+/** Injects the detected device type: 'mobile' | 'tablet' | 'desktop' | 'bot'. */
+export const Device =
+  createParamDecorator('device');
+
+/** Injects the raw User-Agent header string. */
+export const UserAgent =
+  createParamDecorator('useragent');
+
 /* ================= VALIDATED (INFERRED) ================= */
 
 /**
