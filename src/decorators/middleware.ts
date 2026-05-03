@@ -1,7 +1,8 @@
 // decorator/middleware.ts
 import 'reflect-metadata';
 import type { Context, Next } from 'hono';
-import { HonoMiddlewareFn, METADATA_KEYS } from './metadata';
+import { METADATA_KEYS } from './metadata';
+import type { HonoMiddlewareFn } from './metadata';
 
 /* ================= TYPES ================= */
 // Support class-based middleware

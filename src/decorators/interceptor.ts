@@ -1,8 +1,6 @@
 import 'reflect-metadata';
-import {
-  METADATA_KEYS,
-  CacheMetadata,
-} from './metadata';
+import { METADATA_KEYS } from './metadata';
+import type { CacheMetadata } from './metadata';
 
 /* ================= TYPES ================= */
 

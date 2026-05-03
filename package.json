@@ -8,9 +8,9 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     }
   },
   "files": [
@@ -36,6 +36,7 @@
     "zod": ">=3"
   },
   "devDependencies": {
+    "@swc/core": "^1.15.33",
     "@types/bun": "latest",
     "hono": "^4.12.16",
     "reflect-metadata": "^0.2.2",

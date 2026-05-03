@@ -1,19 +1,13 @@
 import 'reflect-metadata';
 
-import type {
-  ZodType,
-  ZodTypeDef,
-} from 'zod';
+import type { ZodType } from 'zod';
 
-import {
-  METADATA_KEYS,
-  ParamMetadata,
-} from './metadata';
+import type { ParamMetadata } from './metadata';
+import { METADATA_KEYS } from './metadata';
 
 /* ================= TYPES ================= */
 
-type ZodSchemaType =
-  ZodType<unknown, ZodTypeDef, unknown>;
+type ZodSchemaType = ZodType;
 
 /* ================= FACTORY ================= */
 

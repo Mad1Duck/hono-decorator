@@ -1,10 +1,7 @@
-import { Context, Next } from 'hono';
+import type { Context, Next } from 'hono';
 import 'reflect-metadata';
 
-import type {
-  ZodType,
-  ZodTypeDef,
-} from 'zod';
+import type { ZodType } from 'zod';
 
 /* ================= KEYS ================= */
 
@@ -56,7 +53,7 @@ export interface ParamMetadata {
   index: number;
   name?: string;
 
-  schema?: ZodType<unknown, ZodTypeDef, unknown>;
+  schema?: ZodType;
 }
 
 /* ================= GUARD ================= */
@@ -78,7 +75,7 @@ export type HonoMiddlewareFn = (c: Context, next: Next) => Promise<Response | vo
 export interface ValidationMetadata {
   type: 'body' | 'query' | 'params';
 
-  schema: ZodType<unknown, ZodTypeDef, unknown>;
+  schema: ZodType;
 }
 
 /* ================= OPENAPI ================= */
@@ -93,7 +90,7 @@ export interface OpenAPIMetadata {
     number,
     {
       description?: string;
-      schema?: ZodType<unknown, ZodTypeDef, unknown>;
+      schema?: ZodType;
     }
   >;
 }

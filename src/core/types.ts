@@ -1,6 +1,6 @@
 /* ================= CORE TYPES ================= */
 
-import { Context } from "hono";
+import type { Context } from "hono";
 
 /**
  * Abstract constructor type for classes that can't be instantiated directly

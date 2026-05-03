@@ -1,10 +1,8 @@
 import 'reflect-metadata';
-import type { ZodType, ZodTypeDef } from 'zod';
+import type { ZodType } from 'zod';
 
-import {
-  METADATA_KEYS,
-  OpenAPIMetadata,
-} from './metadata';
+import { METADATA_KEYS } from './metadata';
+import type { OpenAPIMetadata } from './metadata';
 
 
 /* ================= API DOC ================= */
@@ -33,7 +31,7 @@ export function ApiDoc(
 export function ApiResponse(
   statusCode: number,
   description: string,
-  schema?: ZodType<unknown, ZodTypeDef, unknown>
+  schema?: ZodType
 ): MethodDecorator {
   return <T>(
     target: object,

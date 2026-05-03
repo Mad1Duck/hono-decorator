@@ -1,11 +1,7 @@
 // decorators/guard.ts
 import 'reflect-metadata';
-import {
-  METADATA_KEYS,
-  GuardMetadata,
-  RateLimitMetadata,
-  RouteMetadata,
-} from './metadata';
+import { METADATA_KEYS } from './metadata';
+import type { GuardMetadata, RateLimitMetadata, RouteMetadata } from './metadata';
 
 /* ================= TYPES ================= */
 

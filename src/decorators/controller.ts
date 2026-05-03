@@ -1,10 +1,7 @@
 import 'reflect-metadata';
 
-import {
-  METADATA_KEYS,
-  ControllerMetadata,
-  RouteMetadata,
-} from './metadata';
+import { METADATA_KEYS } from './metadata';
+import type { ControllerMetadata, RouteMetadata } from './metadata';
 
 /* ================= TYPES ================= */
 

@@ -5,15 +5,15 @@ import type { Context } from 'hono';
 import { ZodError } from 'zod';
 
 import { container } from './container';
-import {
-  METADATA_KEYS,
+import { METADATA_KEYS } from '../decorators/metadata';
+import type {
   RouteMetadata,
   ParamMetadata,
   GuardMetadata,
   RateLimitMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
-import { AbstractConstructor, ConcreteConstructor, ControllerInstance } from './types';
+import type { AbstractConstructor, ConcreteConstructor, ControllerInstance } from './types';
 
 /* ================= TYPES ================= */
 
@@ -300,7 +300,7 @@ export class HonoRouteBuilder {
                 error: {
                   code: 'VALIDATION_ERROR',
                   message: 'Validation failed',
-                  details: error.errors,
+                  details: error.issues,
                 },
               },
               400
