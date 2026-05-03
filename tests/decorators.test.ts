@@ -17,6 +17,8 @@ import {
   Param,
   Headers,
   User,
+  Req,
+  Res,
   SseStream,
   RequireAuth,
   RequireRole,
@@ -27,6 +29,10 @@ import {
   Public,
   Middleware,
   Cache,
+  Retry,
+  Timeout,
+  Transform,
+  TrackMetrics,
   METADATA_KEYS,
 } from '../src';
 import type {
@@ -384,5 +390,111 @@ describe('@Cache', () => {
 
     expect(meta.ttl).toBe(5000);
     expect(meta.key).toBe('my-key');
+  });
+});
+
+/* ================= REQ / RES ================= */
+
+class ReqResCtrl {
+  handler(
+    @Req() _req: unknown,
+    @Res() _res: unknown,
+  ) {}
+}
+
+describe('@Req / @Res', () => {
+  function getParams(): ParamMetadata[] {
+    return Reflect.getMetadata(METADATA_KEYS.PARAMS, new ReqResCtrl(), 'handler') ?? [];
+  }
+
+  it('@Req sets type "req" at index 0', () => {
+    const p = getParams().find(p => p.type === 'req');
+    expect(p?.index).toBe(0);
+  });
+
+  it('@Res sets type "res" at index 1', () => {
+    const p = getParams().find(p => p.type === 'res');
+    expect(p?.index).toBe(1);
+  });
+});
+
+/* ================= INTERCEPTORS ================= */
+
+describe('@Retry', () => {
+  it('succeeds if method eventually passes within attempts', async () => {
+    let calls = 0;
+    class Svc {
+      @Retry({ attempts: 3, delay: 0 })
+      async fetch() {
+        calls++;
+        if (calls < 3) throw new Error('transient');
+        return 'ok';
+      }
+    }
+    const result = await new Svc().fetch();
+    expect(result).toBe('ok');
+    expect(calls).toBe(3);
+  });
+
+  it('throws after exhausting all attempts', async () => {
+    class Svc {
+      @Retry({ attempts: 2, delay: 0 })
+      async fetch(): Promise<string> { throw new Error('always fails'); }
+    }
+    await expect(new Svc().fetch()).rejects.toThrow('always fails');
+  });
+});
+
+describe('@Timeout', () => {
+  it('resolves when method completes before timeout', async () => {
+    class Svc {
+      @Timeout(1000)
+      async fast() { return 'done'; }
+    }
+    await expect(new Svc().fast()).resolves.toBe('done');
+  });
+
+  it('rejects when method exceeds timeout', async () => {
+    class Svc {
+      @Timeout(10)
+      async slow() { return new Promise(r => setTimeout(r, 500)); }
+    }
+    await expect(new Svc().slow()).rejects.toThrow(/Timeout/);
+  });
+});
+
+describe('@Transform', () => {
+  it('applies transform function to return value', async () => {
+    class Svc {
+      @Transform((x: number) => x * 2)
+      async compute() { return 5; }
+    }
+    await expect(new Svc().compute()).resolves.toBe(10);
+  });
+
+  it('can transform to a different shape', async () => {
+    class Svc {
+      @Transform((u: { id: number; name: string }) => ({ id: u.id }))
+      async getUser() { return { id: 1, name: 'Alice' }; }
+    }
+    await expect(new Svc().getUser()).resolves.toEqual({ id: 1 });
+  });
+});
+
+describe('@TrackMetrics', () => {
+  it('passes return value through unchanged', async () => {
+    class Svc {
+      @TrackMetrics({ name: 'test_metric' })
+      async compute() { return 42; }
+    }
+    await expect(new Svc().compute()).resolves.toBe(42);
+  });
+
+  it('re-throws errors from the original method', async () => {
+    class Svc {
+      @TrackMetrics()
+      async boom(): Promise<void> { throw new Error('metric error'); }
+    }
+    await expect(new Svc().boom()).rejects.toThrow('metric error');
   });
 });

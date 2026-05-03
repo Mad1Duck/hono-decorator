@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Delete,
   Head,
   Options,
@@ -154,6 +155,44 @@ class WsController {
   connect() {
     return { onMessage: (_e: unknown, _ws: unknown) => {} };
   }
+}
+
+const PatchItemSchema = z.object({ name: z.string().min(1) });
+const QueryFilterSchema = z.object({ search: z.string().optional(), limit: z.coerce.number().optional() });
+
+@Controller('/patch-test')
+class PatchController {
+  private items: Record<string, string> = { '1': 'Apple', '2': 'Banana' };
+
+  @Patch('/:id')
+  @Public()
+  update(@Param('id') id: string, @Body(PatchItemSchema) body: z.infer<typeof PatchItemSchema>) {
+    this.items[id] = body.name;
+    return { id, name: body.name };
+  }
+}
+
+@Controller('/qschema-test')
+class QuerySchemaController {
+  @Get()
+  @Public()
+  list(@Query(QueryFilterSchema) q: z.infer<typeof QueryFilterSchema>) {
+    return { search: q.search ?? null, limit: q.limit ?? null };
+  }
+}
+
+@Controller('/platform-test', { platform: 'web', version: 'v1' })
+class WebController {
+  @Get()
+  @Public()
+  list() { return { platform: 'web' }; }
+}
+
+@Controller('/platform-test', { platform: 'mobile', version: 'v1' })
+class MobileController {
+  @Get()
+  @Public()
+  list() { return { platform: 'mobile' }; }
 }
 
 /* ================= TESTS ================= */
@@ -429,6 +468,85 @@ describe('HonoRouteBuilder', () => {
         body: JSON.stringify({ name: '' }),
       }));
       expect(res.status).toBe(400);
+    });
+  });
+
+  /* -------- @Patch -------- */
+
+  describe('@Patch', () => {
+    it('PATCH /:id updates and returns item', async () => {
+      const app = HonoRouteBuilder.build(PatchController);
+      const res = await app.fetch(makeRequest('/patch-test/1', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Mango' }),
+      }));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { id: string; name: string };
+      expect(body.id).toBe('1');
+      expect(body.name).toBe('Mango');
+    });
+
+    it('PATCH returns 400 when body fails Zod validation', async () => {
+      const app = HonoRouteBuilder.build(PatchController);
+      const res = await app.fetch(makeRequest('/patch-test/1', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '' }),
+      }));
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { code: string } };
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+    });
+  });
+
+  /* -------- @Query with Zod schema -------- */
+
+  describe('@Query with Zod schema', () => {
+    it('passes valid query params through schema', async () => {
+      const app = HonoRouteBuilder.build(QuerySchemaController);
+      const res = await app.fetch(makeRequest('/qschema-test?search=hello&limit=5'));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { search: string; limit: number };
+      expect(body.search).toBe('hello');
+      expect(body.limit).toBe(5);
+    });
+
+    it('returns 400 when query fails Zod validation', async () => {
+      const app = HonoRouteBuilder.build(QuerySchemaController);
+      const res = await app.fetch(makeRequest('/qschema-test?limit=notanumber'));
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { code: string } };
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('optional fields are null when omitted', async () => {
+      const app = HonoRouteBuilder.build(QuerySchemaController);
+      const res = await app.fetch(makeRequest('/qschema-test'));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { search: null; limit: null };
+      expect(body.search).toBeNull();
+      expect(body.limit).toBeNull();
+    });
+  });
+
+  /* -------- platform filter -------- */
+
+  describe('platform filter', () => {
+    it('web platform routes respond under /web/v1/', async () => {
+      const app = HonoRouteBuilder.build(WebController);
+      const res = await app.fetch(makeRequest('/web/v1/platform-test'));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { platform: string };
+      expect(body.platform).toBe('web');
+    });
+
+    it('mobile platform routes respond under /mobile/v1/', async () => {
+      const app = HonoRouteBuilder.build(MobileController);
+      const res = await app.fetch(makeRequest('/mobile/v1/platform-test'));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { platform: string };
+      expect(body.platform).toBe('mobile');
     });
   });
 
