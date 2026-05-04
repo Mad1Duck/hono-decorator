@@ -63,11 +63,7 @@ export function RequireAuth(): MethodDecorator {
         propertyKey
       ) as GuardMetadata[] | undefined) ?? [];
 
-    guards.push({
-      name: 'AuthGuard',
-    });
-
-    Reflect.defineMetadata(METADATA_KEYS.GUARDS, guards, target, propertyKey);
+    Reflect.defineMetadata(METADATA_KEYS.GUARDS, [...guards, { name: 'AuthGuard' }], target, propertyKey);
 
     return descriptor;
   };
@@ -92,12 +88,7 @@ export function RequireRole(...roles: string[]): MethodDecorator {
         propertyKey
       ) as GuardMetadata[] | undefined) ?? [];
 
-    guards.push({
-      name: 'RoleGuard',
-      options: { roles },
-    });
-
-    Reflect.defineMetadata(METADATA_KEYS.GUARDS, guards, target, propertyKey);
+    Reflect.defineMetadata(METADATA_KEYS.GUARDS, [...guards, { name: 'RoleGuard', options: { roles } }], target, propertyKey);
 
     return descriptor;
   };
@@ -122,12 +113,7 @@ export function RequirePermission(...permissions: string[]): MethodDecorator {
         propertyKey
       ) as GuardMetadata[] | undefined) ?? [];
 
-    guards.push({
-      name: 'PermissionGuard',
-      options: { permissions, requireAll: true },
-    });
-
-    Reflect.defineMetadata(METADATA_KEYS.GUARDS, guards, target, propertyKey);
+    Reflect.defineMetadata(METADATA_KEYS.GUARDS, [...guards, { name: 'PermissionGuard', options: { permissions, requireAll: true } }], target, propertyKey);
 
     return descriptor;
   };
@@ -152,12 +138,7 @@ export function RequireAnyPermission(...permissions: string[]): MethodDecorator 
         propertyKey
       ) as GuardMetadata[] | undefined) ?? [];
 
-    guards.push({
-      name: 'PermissionGuard',
-      options: { permissions, requireAll: false },
-    });
-
-    Reflect.defineMetadata(METADATA_KEYS.GUARDS, guards, target, propertyKey);
+    Reflect.defineMetadata(METADATA_KEYS.GUARDS, [...guards, { name: 'PermissionGuard', options: { permissions, requireAll: false } }], target, propertyKey);
 
     return descriptor;
   };
@@ -258,12 +239,7 @@ export function RequireAllRoles(...roles: string[]): MethodDecorator {
         propertyKey
       ) as GuardMetadata[] | undefined) ?? [];
 
-    guards.push({
-      name: 'RoleGuard',
-      options: { roles, requireAll: true },
-    });
-
-    Reflect.defineMetadata(METADATA_KEYS.GUARDS, guards, target, propertyKey);
+    Reflect.defineMetadata(METADATA_KEYS.GUARDS, [...guards, { name: 'RoleGuard', options: { roles, requireAll: true } }], target, propertyKey);
 
     return descriptor;
   };

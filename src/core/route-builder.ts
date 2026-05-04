@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -216,12 +214,11 @@ export class HonoRouteBuilder {
     const middlewares: HonoMiddlewareFn[] = [];
 
     /* ----- Collect Middlewares ----- */
-    const classMiddlewares = isPublic
-      ? []
-      : (Reflect.getMetadata(
-        METADATA_KEYS.MIDDLEWARES,
-        proto.constructor
-      ) as HonoMiddlewareFn[] | undefined) ?? [];
+    // Class middlewares always run — @Public only skips guards, not middleware
+    const classMiddlewares = (Reflect.getMetadata(
+      METADATA_KEYS.MIDDLEWARES,
+      proto.constructor
+    ) as HonoMiddlewareFn[] | undefined) ?? [];
 
     const methodMiddlewares = (Reflect.getMetadata(
       METADATA_KEYS.MIDDLEWARES,
@@ -336,12 +333,11 @@ export class HonoRouteBuilder {
     }
     const fullPath = `${basePath}${path}`;
 
-    // Escape hatch: Hono's generic types can't infer spread middleware arrays,
-    // so we use a plain function reference that matches the underlying API.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const honoApp = app as any;
+    // Hono's generic types can't infer spread middleware arrays via app[method](),
+    // so we cast to a narrower interface that exposes exactly what we need.
+    type HonoWithOn = { on(method: string, path: string, ...handlers: HonoMiddlewareFn[]): Hono };
     const register = (m: string, ...handlers: HonoMiddlewareFn[]) =>
-      honoApp.on(m.toUpperCase(), fullPath, ...handlers) as void;
+      (app as unknown as HonoWithOn).on(m.toUpperCase(), fullPath, ...handlers);
 
     /* ----- SSE Route ----- */
     const isSse = Reflect.getMetadata(
@@ -391,7 +387,6 @@ export class HonoRouteBuilder {
       let response: Response;
 
       try {
-        (controllerInstance as Record<string, unknown>)['__ctx'] = c;
         const args = await this.resolveParameters(params, c);
         const fn = controllerInstance[handlerName];
 
@@ -400,11 +395,8 @@ export class HonoRouteBuilder {
         }
 
         const result = await fn.apply(controllerInstance, args);
-        delete (controllerInstance as Record<string, unknown>)['__ctx'];
-
         response = result !== undefined ? c.json(result) : c.body(null);
       } catch (error: unknown) {
-        delete (controllerInstance as Record<string, unknown>)['__ctx'];
 
         if (error instanceof ZodError) {
           response = c.json(
@@ -458,11 +450,8 @@ export class HonoRouteBuilder {
   ): Promise<unknown[]> {
     const args: unknown[] = [];
 
-    params
-      .sort((a, b) => a.index - b.index)
-      .forEach((p) => {
-        args[p.index] = undefined;
-      });
+    const sorted = [...params].sort((a, b) => a.index - b.index);
+    for (const p of sorted) args[p.index] = undefined;
 
     // Resolve each parameter
     for (const param of params) {

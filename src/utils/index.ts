@@ -10,3 +10,4 @@ export {
   extractUserAgent,
   extractRequestContext,
 } from './request';
+export { discoverControllers, fromModules } from './discover';

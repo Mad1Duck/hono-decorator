@@ -67,6 +67,9 @@ export function Middleware(
   };
 }
 
+/** Alias for @Middleware — familiar for NestJS/Express users. */
+export const Use = Middleware;
+
 /* ================= HELPER ================= */
 
 function isMiddlewareClass(

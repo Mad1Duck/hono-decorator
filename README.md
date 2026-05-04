@@ -7,9 +7,10 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Controller routing** — `@Controller`, `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Head`, `@Options`, `@All`
 - **Dependency injection** — `@Injectable`, `@Singleton`, `@Inject`, circular dependency detection
 - **Parameter decorators** — `@Body`, `@Query`, `@Param`, `@Headers`, `@User`, `@Ip`, `@Device`, `@UserAgent` with optional Zod validation
-- **Guards** — `@RequireAuth`, `@RequireRole`, `@RequirePermission` with pluggable executor
+- **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
 - **Rate limiting** — `@RateLimit` with pluggable factory
-- **Middleware** — `@Middleware` at class or method level
+- **Middleware** — `@Middleware` / `@Use` at class or method level
+- **Auto-discovery** — `discoverControllers` (Bun) and `fromModules` (any bundler)
 - **SSE** — `@Sse`, `@SseStream` with streaming API
 - **WebSocket** — `@WebSocket` with pluggable upgrader
 - **Channels** — pub/sub for SSE and WS; in-memory default, pluggable to Redis
@@ -89,6 +90,61 @@ const app = new Hono();
 app.route('/', HonoRouteBuilder.build(UserController));
 export default app;
 ```
+
+---
+
+## OpenAPI 3.1 + Scalar UI
+
+Auto-generate a full OpenAPI spec from your decorators and serve interactive docs in one call — no extra packages needed.
+
+```ts
+import { OpenAPIGenerator, HonoRouteBuilder } from 'hono-forge';
+import { Hono } from 'hono';
+
+const app = new Hono();
+app.route('/', HonoRouteBuilder.build(UserController));
+
+// Generates spec + serves Scalar UI at /docs and /openapi.json
+const spec = OpenAPIGenerator.generate([UserController], {
+  info: { title: 'My API', version: '1.0.0' },
+  servers: [{ url: 'https://api.example.com' }],
+});
+OpenAPIGenerator.mount(app, spec);
+
+export default app;
+```
+
+Annotate controllers with `@ApiTags`, `@ApiDoc`, `@ApiResponse`, `@ApiDeprecated` — auth, validation, and path params are reflected automatically.
+
+---
+
+## Auto-discovery
+
+Avoid manually listing every controller. Use `discoverControllers` (Bun runtime) or `fromModules` (any bundler):
+
+```ts
+import { discoverControllers, fromModules, HonoRouteBuilder } from 'hono-forge';
+import { Hono } from 'hono';
+
+const app = new Hono();
+
+// Bun — scan filesystem at runtime
+const controllers = await discoverControllers('./src/controllers/**/*.ts');
+for (const ctrl of controllers) {
+  app.route('/', HonoRouteBuilder.build(ctrl));
+}
+
+// Any bundler — use import.meta.glob (eager)
+const modules = import.meta.glob('./controllers/**/*.ts', { eager: true });
+const controllers2 = fromModules(modules as Record<string, Record<string, unknown>>);
+for (const ctrl of controllers2) {
+  app.route('/', HonoRouteBuilder.build(ctrl));
+}
+
+export default app;
+```
+
+Both functions only pick up classes decorated with `@Controller` — other exports are ignored.
 
 ---
 
@@ -265,6 +321,8 @@ login(@Body() body: LoginDto) { /* ... */ }
 
 ## Middleware
 
+Apply any Hono middleware at class level (all routes) or method level (one route) using `@Middleware`.
+
 ```ts
 const logMw = async (c: Context, next: Next) => {
   console.log(c.req.method, c.req.path);
@@ -272,12 +330,31 @@ const logMw = async (c: Context, next: Next) => {
 };
 
 @Controller('/api')
-@Middleware(logMw)           // all routes in this controller
+@Middleware(logMw)             // applies to every route in this controller
 class ApiController {
   @Get()
-  @Middleware(tracingMw)     // this route only
+  @Middleware(tracingMw)       // applies to this route only
   list() { /* ... */ }
+
+  @Post()
+  create(@Body() body: unknown) { /* ... */ }
 }
+```
+
+Multiple middleware are applied in order:
+
+```ts
+@Get('/admin')
+@Middleware(authMw, auditMw)   // authMw runs first, then auditMw
+adminOnly() { /* ... */ }
+```
+
+`@Use` is an alias for `@Middleware` — pick whichever reads better:
+
+```ts
+@Get()
+@Use(logMw)
+list() { /* ... */ }
 ```
 
 ---
@@ -498,8 +575,8 @@ getAll() { /* ... */ }
 import 'reflect-metadata';
 import { Hono } from 'hono';
 import {
-  Controller, Get, Post, Delete,
-  Body, Param, User, Ip, Device,
+  Controller, Get, Post, Delete, Sse,
+  Body, Param, User, Ip, Device, SseStream,
   RequireAuth, RequireRole, Public,
   Injectable, Singleton,
   HonoRouteBuilder, container,

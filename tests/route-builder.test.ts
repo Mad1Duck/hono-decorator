@@ -21,8 +21,10 @@ import {
   Public,
   RateLimit,
   Middleware,
+  Use,
   HonoRouteBuilder,
   container,
+  fromModules,
 } from '../src';
 import type { Context, Next } from 'hono';
 import { z } from 'zod';
@@ -547,6 +549,99 @@ describe('HonoRouteBuilder', () => {
       expect(res.status).toBe(200);
       const body = await res.json() as { platform: string };
       expect(body.platform).toBe('mobile');
+    });
+  });
+
+  /* -------- @Public does not skip class middleware -------- */
+
+  describe('@Public + class @Middleware', () => {
+    const classLog: string[] = [];
+    const classMw = async (_c: Context, next: Next) => {
+      classLog.push('class-mw');
+      await next();
+    };
+
+    @Controller('/public-mw')
+    @Middleware(classMw)
+    class PublicWithClassMwController {
+      @Get()
+      @Public()
+      handle() { return { ok: true }; }
+    }
+
+    beforeEach(() => { classLog.length = 0; });
+
+    it('class middleware still runs on @Public routes', async () => {
+      const app = HonoRouteBuilder.build(PublicWithClassMwController);
+      await app.fetch(makeRequest('/public-mw'));
+      expect(classLog).toContain('class-mw');
+    });
+  });
+
+  /* -------- @Use alias -------- */
+
+  describe('@Use alias', () => {
+    const useLog: string[] = [];
+    const useMw = async (_c: Context, next: Next) => {
+      useLog.push('use-mw');
+      await next();
+    };
+
+    @Controller('/use-test')
+    class UseController {
+      @Get()
+      @Public()
+      @Use(useMw)
+      handle() { return { ok: true }; }
+    }
+
+    beforeEach(() => { useLog.length = 0; });
+
+    it('@Use behaves identically to @Middleware', async () => {
+      const app = HonoRouteBuilder.build(UseController);
+      await app.fetch(makeRequest('/use-test'));
+      expect(useLog).toContain('use-mw');
+    });
+  });
+
+  /* -------- fromModules -------- */
+
+  describe('fromModules', () => {
+    it('extracts @Controller classes from module map', () => {
+      @Controller('/mod-a')
+      class ModAController { @Get() @Public() list() { return []; } }
+
+      class NotAController {}
+
+      const modules = {
+        './mod-a.ts': { ModAController, NotAController, someValue: 42 },
+      } as Record<string, Record<string, unknown>>;
+
+      const controllers = fromModules(modules);
+      expect(controllers).toContain(ModAController);
+      expect(controllers).not.toContain(NotAController);
+      expect(controllers.length).toBe(1);
+    });
+
+    it('collects controllers from multiple modules', () => {
+      @Controller('/mod-b') class ModBController { @Get() @Public() list() { return []; } }
+      @Controller('/mod-c') class ModCController { @Get() @Public() list() { return []; } }
+
+      const modules = {
+        './mod-b.ts': { ModBController },
+        './mod-c.ts': { ModCController },
+      } as Record<string, Record<string, unknown>>;
+
+      const controllers = fromModules(modules);
+      expect(controllers).toContain(ModBController);
+      expect(controllers).toContain(ModCController);
+    });
+
+    it('returns empty array when no @Controller classes found', () => {
+      const modules = {
+        './plain.ts': { PlainClass: class PlainClass {}, value: 123 },
+      } as Record<string, Record<string, unknown>>;
+      expect(fromModules(modules)).toHaveLength(0);
     });
   });
 

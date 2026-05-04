@@ -6,7 +6,7 @@ import type { Context } from "hono";
  * Abstract constructor type for classes that can't be instantiated directly
  */
 export type AbstractConstructor<T = unknown> = abstract new (
-  ...args: any[]
+  ...args: unknown[]
 ) => T;
 
 /**
@@ -14,7 +14,7 @@ export type AbstractConstructor<T = unknown> = abstract new (
  * @template T - The type of instance this constructor creates
  */
 export type ConcreteConstructor<T = unknown> = new (
-  ...args: any[]
+  ...args: unknown[]
 ) => T;
 
 /**
@@ -42,14 +42,6 @@ export interface ControllerInstance {
 export type ControllerMethod = (
   ...args: unknown[]
 ) => unknown | Promise<unknown>;
-
-/**
- * Controller class with context
- */
-export interface ControllerWithContext {
-  __ctx?: Context;
-  [key: string]: unknown;
-}
 
 /**
  * Type-safe controller resolver
