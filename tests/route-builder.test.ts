@@ -22,6 +22,10 @@ import {
   RateLimit,
   Middleware,
   Use,
+  Cors,
+  Compress,
+  SecureHeaders,
+  PrettyJson,
   HonoRouteBuilder,
   container,
   fromModules,
@@ -652,6 +656,73 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(VoidController);
       const res = await app.fetch(makeRequest('/void-test'));
       expect(res.status).toBe(200);
+    });
+  });
+});
+
+/* ================= COMMON MIDDLEWARE DECORATORS ================= */
+
+describe('common middleware decorators', () => {
+  describe('@Cors', () => {
+    it('sets Access-Control-Allow-Origin header (class-level)', async () => {
+      @Controller('/cors-test')
+      @Cors({ origin: 'https://example.com' })
+      class CorsController {
+        @Get() @Public() list() { return { ok: true }; }
+      }
+      const app = HonoRouteBuilder.build(CorsController);
+      const res = await app.fetch(makeRequest('/cors-test', { headers: { Origin: 'https://example.com' } }));
+      expect(res.headers.get('access-control-allow-origin')).toBe('https://example.com');
+    });
+
+    it('sets wildcard CORS header (method-level)', async () => {
+      @Controller('/cors-method')
+      class CorsMethodController {
+        @Get() @Public() @Cors({ origin: '*' }) list() { return { ok: true }; }
+      }
+      const app = HonoRouteBuilder.build(CorsMethodController);
+      const res = await app.fetch(makeRequest('/cors-method', { headers: { Origin: 'https://any.com' } }));
+      expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    });
+  });
+
+  describe('@Compress', () => {
+    it('registers compress middleware without error', async () => {
+      @Controller('/compress-test')
+      @Compress()
+      class CompressController {
+        @Get() @Public() data() { return { compressed: true }; }
+      }
+      const app = HonoRouteBuilder.build(CompressController);
+      const res = await app.fetch(makeRequest('/compress-test'));
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe('@SecureHeaders', () => {
+    it('sets X-Content-Type-Options header', async () => {
+      @Controller('/secure-test')
+      @SecureHeaders()
+      class SecureController {
+        @Get() @Public() info() { return { secure: true }; }
+      }
+      const app = HonoRouteBuilder.build(SecureController);
+      const res = await app.fetch(makeRequest('/secure-test'));
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    });
+  });
+
+  describe('@PrettyJson', () => {
+    it('pretty-prints JSON when ?pretty query present', async () => {
+      @Controller('/pretty-test')
+      @PrettyJson()
+      class PrettyController {
+        @Get() @Public() data() { return { key: 'value' }; }
+      }
+      const app = HonoRouteBuilder.build(PrettyController);
+      const res = await app.fetch(makeRequest('/pretty-test?pretty'));
+      const text = await res.text();
+      expect(text).toContain('\n');
     });
   });
 });

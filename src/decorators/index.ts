@@ -6,5 +6,6 @@ export * from './interceptor';
 export * from './openapi';
 export * from './custom';
 export * from './middleware';
+export * from './common-middleware';
 export * from './sse';
 export * from './websocket';

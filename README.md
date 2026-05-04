@@ -9,7 +9,7 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Parameter decorators** — `@Body`, `@Query`, `@Param`, `@Headers`, `@User`, `@Ip`, `@Device`, `@UserAgent` with optional Zod validation
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
 - **Rate limiting** — `@RateLimit` with pluggable factory
-- **Middleware** — `@Middleware` / `@Use` at class or method level
+- **Middleware** — `@Middleware` / `@Use` at class or method level; built-in `@Cors`, `@Compress`, `@SecureHeaders`, `@PrettyJson`
 - **Auto-discovery** — `discoverControllers` (Bun) and `fromModules` (any bundler)
 - **SSE** — `@Sse`, `@SseStream` with streaming API
 - **WebSocket** — `@WebSocket` with pluggable upgrader
@@ -356,6 +356,47 @@ adminOnly() { /* ... */ }
 @Use(logMw)
 list() { /* ... */ }
 ```
+
+### Class-based middleware
+
+Implement the `MiddlewareClass` interface for reusable stateful middleware:
+
+```ts
+import type { MiddlewareClass } from 'hono-forge';
+import type { Context, Next } from 'hono';
+
+class AuthMiddleware implements MiddlewareClass {
+  async use(c: Context, next: Next) {
+    const token = c.req.header('authorization');
+    if (!token) return c.json({ error: 'Unauthorized' }, 401);
+    await next();
+  }
+}
+
+@Controller('/admin')
+@Use(AuthMiddleware)
+class AdminController { /* ... */ }
+```
+
+### Built-in middleware decorators
+
+Common Hono middleware available as first-class decorators — no `@Middleware(cors(...))` boilerplate needed.
+
+```ts
+import { Cors, Compress, SecureHeaders, PrettyJson } from 'hono-forge';
+
+@Controller('/api')
+@Cors({ origin: 'https://example.com' })     // CORS headers
+@SecureHeaders()                              // CSP, HSTS, X-Frame-Options, etc.
+@Compress()                                   // gzip / deflate compression
+class ApiController {
+  @Get('/debug')
+  @PrettyJson()                               // formatted JSON output
+  debug() { return { status: 'ok' }; }
+}
+```
+
+All four can be used at class level (applies to every route) or method level (applies to one route). Options match Hono's underlying middleware — see [Hono middleware docs](https://hono.dev/docs/middleware/builtin/cors) for full option reference.
 
 ---
 

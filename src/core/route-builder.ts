@@ -18,7 +18,7 @@ import type {
   RateLimitMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
-import type { AbstractConstructor, ConcreteConstructor, ControllerInstance } from './types';
+import type { AbstractConstructor, ConcreteConstructor, ControllerConstructor, ControllerInstance } from './types';
 
 /* ================= TYPES ================= */
 
@@ -141,7 +141,7 @@ export class HonoRouteBuilder {
   /* ---------- BUILD ---------- */
 
   static build<T>(
-    ControllerClass: AbstractConstructor<T>,
+    ControllerClass: ControllerConstructor<T>,
     platform?: 'mobile' | 'web'
   ): Hono {
     const app = new Hono();

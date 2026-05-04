@@ -477,7 +477,7 @@ describe('@Transform', () => {
       @Transform((u: { id: number; name: string }) => ({ id: u.id }))
       async getUser() { return { id: 1, name: 'Alice' }; }
     }
-    await expect(new Svc().getUser()).resolves.toEqual({ id: 1 });
+    await expect(new Svc().getUser()).resolves.toEqual({ id: 1 } as { id: number; name: string });
   });
 });
 

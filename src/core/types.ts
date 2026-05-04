@@ -1,21 +1,20 @@
 /* ================= CORE TYPES ================= */
 
-import type { Context } from "hono";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyArgs = any[];
 
 /**
- * Abstract constructor type for classes that can't be instantiated directly
+ * Abstract constructor — used for DI resolution.
+ * Uses `any[]` args intentionally: DI frameworks must accept classes with
+ * specific constructor signatures (e.g. `new (svc: UserService) => T`).
+ * `unknown[]` would reject those, breaking constructor injection.
  */
-export type AbstractConstructor<T = unknown> = abstract new (
-  ...args: unknown[]
-) => T;
+export type AbstractConstructor<T = unknown> = abstract new (...args: AnyArgs) => T;
 
 /**
- * Concrete constructor type for classes that can be instantiated
- * @template T - The type of instance this constructor creates
+ * Concrete constructor — used for DI resolution and container registration.
  */
-export type ConcreteConstructor<T = unknown> = new (
-  ...args: unknown[]
-) => T;
+export type ConcreteConstructor<T = unknown> = new (...args: AnyArgs) => T;
 
 /**
  * Constructor with dependencies (for DI)
@@ -28,6 +27,21 @@ export type InjectableConstructor<T = unknown> = ConcreteConstructor<T> & {
  * Factory function type
  */
 export type Factory<T = unknown> = () => T;
+
+/**
+ * Phantom brand added to a class by @Controller().
+ * Ensures HonoRouteBuilder.build() only accepts properly decorated controllers.
+ */
+declare const CONTROLLER_BRAND: unique symbol;
+export type HonoForgeController = { readonly [CONTROLLER_BRAND]?: true };
+
+/**
+ * A constructor (abstract or concrete) that has been decorated with @Controller.
+ * Pass this to HonoRouteBuilder.build().
+ */
+export type ControllerConstructor<T = unknown> =
+  | ((new (...args: AnyArgs) => T) & HonoForgeController)
+  | ((abstract new (...args: AnyArgs) => T) & HonoForgeController);
 
 /**
  * Controller instance with typed methods

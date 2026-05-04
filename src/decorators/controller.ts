@@ -2,6 +2,7 @@ import 'reflect-metadata';
 
 import { METADATA_KEYS } from './metadata';
 import type { ControllerMetadata, RouteMetadata } from './metadata';
+import type { HonoForgeController } from '../core/types';
 
 /* ================= TYPES ================= */
 
@@ -15,8 +16,10 @@ export function Controller(
     platform?: 'mobile' | 'web';
     version?: string;
   }
-): ClassDecorator {
-  return (target): void => {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): <T extends abstract new (...args: any[]) => unknown>(target: T) => T & HonoForgeController {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return <T extends abstract new (...args: any[]) => unknown>(target: T): T & HonoForgeController => {
     const platform = options?.platform;
     const version = options?.version ?? 'v1';
 
@@ -35,6 +38,8 @@ export function Controller(
       metadata,
       target
     );
+
+    return target as T & HonoForgeController;
   };
 }
 
