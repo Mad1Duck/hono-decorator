@@ -259,6 +259,57 @@ create(@Body(Schema) body: z.infer<typeof Schema>) {
 }
 ```
 
+### File uploads
+
+Use `@UploadedFile`, `@UploadedFiles`, or `@FormBody` on multipart/form-data routes.
+
+```ts
+@Post('/avatar')
+uploadAvatar(@UploadedFile('avatar') file: File | null) {
+  if (!file) return c.json({ error: 'no file' }, 400);
+  return { name: file.name, size: file.size, type: file.type };
+}
+
+@Post('/gallery')
+uploadMany(@UploadedFiles('photos') files: File[]) {
+  return files.map(f => ({ name: f.name, size: f.size }));
+}
+
+@Post('/submit')
+handleForm(@FormBody() form: FormData, @UploadedFile('doc') doc: File | null) {
+  const title = form.get('title') as string;
+  return { title, docName: doc?.name };
+}
+```
+
+| Decorator | Returns | Notes |
+|-----------|---------|-------|
+| `@UploadedFile(fieldName)` | `File \| null` | Single file by field name |
+| `@UploadedFiles(fieldName?)` | `File[]` | Multiple files; omit field to get all files in the form |
+| `@FormBody()` | `FormData` | Raw form data object |
+
+`FormData` is parsed **once per request** even when multiple file decorators are used on the same handler.
+
+### `@ValidatedBody` / `@ValidatedQuery` / `@ValidatedParam`
+
+Type-safe aliases that carry the inferred Zod type so TypeScript can narrow the parameter without an explicit annotation:
+
+```ts
+const UserSchema = z.object({ name: z.string(), age: z.number() });
+const IdSchema   = z.string().uuid();
+
+@Post()
+create(@ValidatedBody(UserSchema) body: typeof UserSchema._output) { /* ... */ }
+
+@Get()
+list(@ValidatedQuery(z.object({ page: z.coerce.number() })) q: { page: number }) { /* ... */ }
+
+@Get('/:id')
+getOne(@ValidatedParam('id', IdSchema) id: string) { /* ... */ }
+```
+
+Behaves identically to `@Body` / `@Query` / `@Param` — invalid input returns `400 VALIDATION_ERROR`.
+
 ---
 
 ## Guards
@@ -607,6 +658,60 @@ Stores cache metadata — integrate with your own cache layer.
 @Cache({ ttl: 60_000, key: 'user-list' })
 getAll() { /* ... */ }
 ```
+
+### `@Throttle`
+
+Limits how often a method can be called. Throws if called again before `ms` milliseconds have passed.
+
+```ts
+@Throttle(1000)
+async sendWebhook() { /* ... */ }
+```
+
+### `@Memoize`
+
+Caches the return value in memory keyed by serialized arguments. Optional `ttl` (ms) before the cache expires.
+
+```ts
+@Memoize({ ttl: 30_000 })
+async getConfig() { return fetchRemoteConfig(); }
+```
+
+### `@ValidateResult`
+
+Validates the return value against a Zod schema. Throws `ZodError` if the result doesn't match — useful for enforcing response contracts at service boundaries.
+
+```ts
+const UserSchema = z.object({ id: z.number(), name: z.string() });
+
+@ValidateResult(UserSchema)
+async getUser(id: number) { return db.findUser(id); }
+```
+
+### `@Audit`
+
+Logs an audit entry before the method executes. Reads `this.logger` (if present) or falls back to `console.log`. Entry includes `action`, `userId`, `timestamp`, and method name.
+
+```ts
+@Audit({ action: 'user.delete' })
+async remove(id: string) { /* ... */ }
+```
+
+Expects `this.logger` to implement `{ info(data, msg?): void }` (compatible with Pino, Winston, etc.).
+
+### `@Transaction`
+
+Wraps the method inside `this.db.transaction()`. Compatible with Drizzle ORM, Kysely, and any client that exposes `.transaction(fn)`.
+
+```ts
+@Transaction()
+async transfer(from: string, to: string, amount: number) {
+  await this.db.update(accounts).set(...);
+  await this.db.update(accounts).set(...);
+}
+```
+
+Throws at call-time if `this.db` is not set on the instance.
 
 ---
 

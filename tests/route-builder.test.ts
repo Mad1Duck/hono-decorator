@@ -26,6 +26,9 @@ import {
   Compress,
   SecureHeaders,
   PrettyJson,
+  UploadedFile,
+  UploadedFiles,
+  FormBody,
   HonoRouteBuilder,
   container,
   fromModules,
@@ -723,6 +726,126 @@ describe('common middleware decorators', () => {
       const res = await app.fetch(makeRequest('/pretty-test?pretty'));
       const text = await res.text();
       expect(text).toContain('\n');
+    });
+  });
+});
+
+/* ================= FILE UPLOAD ================= */
+
+describe('file upload decorators', () => {
+  function makeMultipart(path: string, fields: Record<string, string | { name: string; content: string; type?: string }>) {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(fields)) {
+      if (typeof value === 'string') {
+        form.append(key, value);
+      } else {
+        form.append(key, new File([value.content], value.name, { type: value.type ?? 'text/plain' }));
+      }
+    }
+    return new Request(`http://test.local${path}`, { method: 'POST', body: form });
+  }
+
+  describe('@UploadedFile', () => {
+    it('injects a single File by field name', async () => {
+      @Controller('/upload')
+      class UploadCtrl {
+        @Post() @Public()
+        upload(@UploadedFile('avatar') file: File | null) {
+          return { name: (file as File).name, size: (file as File).size };
+        }
+      }
+      const app = HonoRouteBuilder.build(UploadCtrl);
+      const res = await app.fetch(makeMultipart('/upload', { avatar: { name: 'pic.png', content: 'abc', type: 'image/png' } }));
+      const body = await res.json() as { name: string; size: number };
+      expect(body.name).toBe('pic.png');
+      expect(body.size).toBe(3);
+    });
+
+    it('returns null when the field is missing', async () => {
+      @Controller('/upload-null')
+      class UploadNullCtrl {
+        @Post() @Public()
+        upload(@UploadedFile('missing') file: File | null) {
+          return { isNull: file === null };
+        }
+      }
+      const app = HonoRouteBuilder.build(UploadNullCtrl);
+      const res = await app.fetch(makeMultipart('/upload-null', { other: 'value' }));
+      const body = await res.json() as { isNull: boolean };
+      expect(body.isNull).toBe(true);
+    });
+  });
+
+  describe('@UploadedFiles', () => {
+    it('injects all files for a given field name', async () => {
+      @Controller('/upload-multi')
+      class MultiCtrl {
+        @Post() @Public()
+        upload(@UploadedFiles('photos') files: File[]) {
+          return { count: files.length, names: files.map(f => f.name) };
+        }
+      }
+      const app = HonoRouteBuilder.build(MultiCtrl);
+      const form = new FormData();
+      form.append('photos', new File(['a'], 'a.png', { type: 'image/png' }));
+      form.append('photos', new File(['bb'], 'b.png', { type: 'image/png' }));
+      const res = await app.fetch(new Request('http://test.local/upload-multi', { method: 'POST', body: form }));
+      const body = await res.json() as { count: number; names: string[] };
+      expect(body.count).toBe(2);
+      expect(body.names).toContain('a.png');
+    });
+
+    it('injects all files across all fields when no fieldName given', async () => {
+      @Controller('/upload-all')
+      class AllCtrl {
+        @Post() @Public()
+        upload(@UploadedFiles() files: File[]) {
+          return { count: files.length };
+        }
+      }
+      const app = HonoRouteBuilder.build(AllCtrl);
+      const form = new FormData();
+      form.append('doc', new File(['x'], 'doc.pdf'));
+      form.append('img', new File(['y'], 'img.jpg'));
+      form.append('name', 'text-field');
+      const res = await app.fetch(new Request('http://test.local/upload-all', { method: 'POST', body: form }));
+      const body = await res.json() as { count: number };
+      expect(body.count).toBe(2);
+    });
+  });
+
+  describe('@FormBody', () => {
+    it('injects the raw FormData object', async () => {
+      @Controller('/form')
+      class FormCtrl {
+        @Post() @Public()
+        submit(@FormBody() form: FormData) {
+          return { name: form.get('name'), age: form.get('age') };
+        }
+      }
+      const app = HonoRouteBuilder.build(FormCtrl);
+      const res = await app.fetch(makeMultipart('/form', { name: 'Alice', age: '30' }));
+      const body = await res.json() as { name: string; age: string };
+      expect(body.name).toBe('Alice');
+      expect(body.age).toBe('30');
+    });
+
+    it('formData is parsed once even when multiple file params exist', async () => {
+      @Controller('/form-multi-param')
+      class MultiParamCtrl {
+        @Post() @Public()
+        submit(@UploadedFile('doc') file: File | null, @FormBody() form: FormData) {
+          return { fileName: (file as File).name, field: form.get('note') };
+        }
+      }
+      const app = HonoRouteBuilder.build(MultiParamCtrl);
+      const form = new FormData();
+      form.append('doc', new File(['hello'], 'report.pdf'));
+      form.append('note', 'important');
+      const res = await app.fetch(new Request('http://test.local/form-multi-param', { method: 'POST', body: form }));
+      const body = await res.json() as { fileName: string; field: string };
+      expect(body.fileName).toBe('report.pdf');
+      expect(body.field).toBe('important');
     });
   });
 });

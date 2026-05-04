@@ -104,6 +104,50 @@ export const Device =
 export const UserAgent =
   createParamDecorator('useragent');
 
+/* ================= FILE UPLOAD ================= */
+
+/**
+ * Injects a single uploaded file from multipart form data.
+ *
+ * @example
+ * @Post('/avatar')
+ * upload(@UploadedFile('avatar') file: File | null) {
+ *   if (!file) return { error: 'no file' };
+ *   return { name: file.name, size: file.size };
+ * }
+ */
+export function UploadedFile(fieldName: string): ParameterDecorator {
+  return createParamDecorator('uploadedfile')(fieldName);
+}
+
+/**
+ * Injects all uploaded files from multipart form data.
+ * Pass a fieldName to filter by field, or omit to get every file in the form.
+ *
+ * @example
+ * @Post('/gallery')
+ * upload(@UploadedFiles('images') files: File[]) {
+ *   return files.map(f => ({ name: f.name, size: f.size }));
+ * }
+ */
+export function UploadedFiles(fieldName?: string): ParameterDecorator {
+  return createParamDecorator('uploadedfiles')(fieldName);
+}
+
+/**
+ * Injects the raw FormData object from a multipart request.
+ *
+ * @example
+ * @Post('/submit')
+ * submit(@FormBody() form: FormData) {
+ *   const name = form.get('name');
+ *   return { name };
+ * }
+ */
+export function FormBody(): ParameterDecorator {
+  return createParamDecorator('formbody')();
+}
+
 /* ================= VALIDATED (INFERRED) ================= */
 
 /**

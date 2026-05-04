@@ -54,7 +54,10 @@ export interface ParamMetadata {
   | 'sse'
   | 'ip'
   | 'device'
-  | 'useragent';
+  | 'useragent'
+  | 'uploadedfile'
+  | 'uploadedfiles'
+  | 'formbody';
 
   index: number;
   name?: string;

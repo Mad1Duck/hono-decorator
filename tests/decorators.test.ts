@@ -20,6 +20,9 @@ import {
   Req,
   Res,
   SseStream,
+  ValidatedBody,
+  ValidatedQuery,
+  ValidatedParam,
   RequireAuth,
   RequireRole,
   RequireAllRoles,
@@ -33,6 +36,11 @@ import {
   Timeout,
   Transform,
   TrackMetrics,
+  Throttle,
+  Memoize,
+  ValidateResult,
+  Audit,
+  Transaction,
   METADATA_KEYS,
 } from '../src';
 import type {
@@ -44,6 +52,7 @@ import type {
   HonoMiddlewareFn,
 } from '../src';
 import type { Context, Next } from 'hono';
+import { z } from 'zod';
 
 /* ================= CONTROLLER ================= */
 
@@ -496,5 +505,173 @@ describe('@TrackMetrics', () => {
       async boom(): Promise<void> { throw new Error('metric error'); }
     }
     await expect(new Svc().boom()).rejects.toThrow('metric error');
+  });
+});
+
+/* ================= VALIDATED PARAM DECORATORS ================= */
+
+describe('@ValidatedBody / @ValidatedQuery / @ValidatedParam', () => {
+  it('ValidatedBody sets PARAMS metadata with type=body', () => {
+    class Ctrl {
+      handler(@ValidatedBody(z.object({ name: z.string() })) _body: unknown) {}
+    }
+    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string }[] | undefined;
+    expect(params?.[0]?.type).toBe('body');
+  });
+
+  it('ValidatedQuery sets PARAMS metadata with type=query', () => {
+    class Ctrl {
+      handler(@ValidatedQuery(z.object({ q: z.string() })) _query: unknown) {}
+    }
+    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string }[] | undefined;
+    expect(params?.[0]?.type).toBe('query');
+  });
+
+  it('ValidatedParam sets PARAMS metadata with type=param and name', () => {
+    class Ctrl {
+      handler(@ValidatedParam('id', z.string().uuid()) _id: unknown) {}
+    }
+    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string; name: string }[] | undefined;
+    expect(params?.[0]?.type).toBe('param');
+    expect(params?.[0]?.name).toBe('id');
+  });
+});
+
+/* ================= THROTTLE ================= */
+
+describe('@Throttle', () => {
+  it('allows the first call through', async () => {
+    class Svc {
+      @Throttle(500)
+      async ping() { return 'pong'; }
+    }
+    await expect(new Svc().ping()).resolves.toBe('pong');
+  });
+
+  it('throws on a second call within the throttle window', async () => {
+    class Svc {
+      @Throttle(5000)
+      async ping() { return 'pong'; }
+    }
+    const svc = new Svc();
+    await svc.ping();
+    await expect(svc.ping()).rejects.toThrow('Throttled');
+  });
+});
+
+/* ================= MEMOIZE ================= */
+
+describe('@Memoize', () => {
+  it('returns cached result on second call with same args', async () => {
+    let calls = 0;
+    class Svc {
+      @Memoize()
+      async fetch(id: number) { calls++; return { id }; }
+    }
+    const svc = new Svc();
+    await svc.fetch(1);
+    await svc.fetch(1);
+    expect(calls).toBe(1);
+  });
+
+  it('re-executes for different args', async () => {
+    let calls = 0;
+    class Svc {
+      @Memoize()
+      async fetch(id: number) { calls++; return { id }; }
+    }
+    const svc = new Svc();
+    await svc.fetch(1);
+    await svc.fetch(2);
+    expect(calls).toBe(2);
+  });
+
+  it('re-executes after ttl expires', async () => {
+    let calls = 0;
+    class Svc {
+      @Memoize({ ttl: 50 })
+      async fetch() { calls++; return calls; }
+    }
+    const svc = new Svc();
+    await svc.fetch();
+    await new Promise(r => setTimeout(r, 80));
+    await svc.fetch();
+    expect(calls).toBe(2);
+  });
+});
+
+/* ================= VALIDATE RESULT ================= */
+
+describe('@ValidateResult', () => {
+  it('passes through a valid return value', async () => {
+    const Schema = z.object({ id: z.number() });
+    class Svc {
+      @ValidateResult(Schema)
+      async get() { return { id: 1 }; }
+    }
+    await expect(new Svc().get()).resolves.toEqual({ id: 1 });
+  });
+
+  it('throws ZodError when return value fails schema', async () => {
+    const Schema = z.object({ id: z.number() });
+    class Svc {
+      @ValidateResult(Schema)
+      async get() { return { id: 'not-a-number' }; }
+    }
+    await expect(new Svc().get()).rejects.toThrow();
+  });
+});
+
+/* ================= AUDIT ================= */
+
+describe('@Audit', () => {
+  it('passes return value through unchanged', async () => {
+    class Svc {
+      @Audit({ action: 'user.read' })
+      async getUser() { return { id: 1 }; }
+    }
+    await expect(new Svc().getUser()).resolves.toEqual({ id: 1 });
+  });
+
+  it('calls this.logger.info with audit metadata', async () => {
+    const logged: unknown[] = [];
+    class Svc {
+      logger = { info: (data: unknown) => logged.push(data) };
+      @Audit({ action: 'user.delete' })
+      async remove() { return true; }
+    }
+    await new Svc().remove();
+    expect(logged.length).toBe(1);
+    expect((logged[0] as { action: string }).action).toBe('user.delete');
+  });
+});
+
+/* ================= TRANSACTION ================= */
+
+describe('@Transaction', () => {
+  it('wraps method call inside db.transaction', async () => {
+    let txUsed = false;
+    const fakeDb = {
+      transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+        txUsed = true;
+        return fn({});
+      },
+    };
+    class Repo {
+      db = fakeDb;
+      @Transaction()
+      async save() { return 'saved'; }
+    }
+    const result = await new Repo().save();
+    expect(result).toBe('saved');
+    expect(txUsed).toBe(true);
+  });
+
+  it('throws if no db property on the instance', async () => {
+    class Repo {
+      @Transaction()
+      async save() { return 'saved'; }
+    }
+    await expect(new Repo().save()).rejects.toThrow('@Transaction');
   });
 });

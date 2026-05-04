@@ -453,6 +453,13 @@ export class HonoRouteBuilder {
     const sorted = [...params].sort((a, b) => a.index - b.index);
     for (const p of sorted) args[p.index] = undefined;
 
+    // Lazily parsed once per request to avoid reading the body stream twice
+    let cachedFormData: FormData | undefined;
+    const getFormData = async (): Promise<FormData> => {
+      if (!cachedFormData) cachedFormData = await c.req.formData();
+      return cachedFormData;
+    };
+
     // Resolve each parameter
     for (const param of params) {
       let value: unknown;
@@ -522,6 +529,28 @@ export class HonoRouteBuilder {
 
         case 'useragent': {
           value = extractUserAgent(c);
+          break;
+        }
+
+        case 'uploadedfile': {
+          const fd = await getFormData();
+          value = param.name ? fd.get(param.name) : null;
+          break;
+        }
+
+        case 'uploadedfiles': {
+          const fd = await getFormData();
+          const isFile = (v: FormDataEntryValue): v is File => typeof v !== 'string';
+          if (param.name) {
+            value = fd.getAll(param.name).filter(isFile);
+          } else {
+            value = [...fd.values()].filter(isFile);
+          }
+          break;
+        }
+
+        case 'formbody': {
+          value = await getFormData();
           break;
         }
 
