@@ -61,15 +61,31 @@ export class Container {
   private resolutionStack: string[] = []; // For circular dependency detection
 
   /**
-   * Register a singleton instance
-   * @param token - Injection token (class or string/symbol)
-   * @param instance - Pre-created instance
-   * 
+   * Register a pre-created instance under a token.
+   * Use this for external objects (database connections, config, SDK clients)
+   * that you build yourself before the container starts.
+   *
    * @example
    * ```typescript
-   * const db = new Database();
-   * container.registerSingleton(Database, db);
+   * const DB = Symbol('db');
+   * container.registerInstance(DB, drizzle(connectionString));
+   *
+   * @Injectable()
+   * class UserRepo {
+   *   constructor(@Inject(DB) private db: DrizzleDb) {}
+   * }
    * ```
+   */
+  registerInstance<T>(
+    token: InjectionToken<T>,
+    instance: T
+  ): void {
+    this.singletons.set(token, instance);
+  }
+
+  /**
+   * Alias for registerInstance — kept for backwards compatibility.
+   * Prefer registerInstance when registering a pre-built object.
    */
   registerSingleton<T>(
     token: InjectionToken<T>,

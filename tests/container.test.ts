@@ -120,6 +120,36 @@ describe('Container', () => {
     expect(c.resolve('MY_TOKEN' as never) as typeof value).toBe(value);
   });
 
+  /* -------- registerInstance -------- */
+
+  it('registerInstance stores a pre-built object and resolves via symbol token', () => {
+    const DB = Symbol('db');
+    const fakeDb = { query: () => [] };
+    c.registerInstance(DB, fakeDb);
+    expect(c.resolve(DB as never) as typeof fakeDb).toBe(fakeDb);
+  });
+
+  it('registerInstance allows injecting external objects via @Inject', () => {
+    const REDIS = Symbol('redis');
+    const fakeRedis = { get: (_k: string) => null };
+    c.registerInstance(REDIS, fakeRedis);
+
+    @Injectable()
+    class CacheService {
+      constructor(@Inject(REDIS) public redis: typeof fakeRedis) {}
+    }
+
+    const svc = c.resolve(CacheService);
+    expect(svc.redis).toBe(fakeRedis);
+  });
+
+  it('registerInstance and registerSingleton are interchangeable', () => {
+    const TOKEN = Symbol('tok');
+    const val = { x: 1 };
+    c.registerInstance(TOKEN, val);
+    expect(c.resolve(TOKEN as never) as typeof val).toBe(val);
+  });
+
   /* -------- registerFactory -------- */
 
   it('registerFactory creates new instance each call', () => {

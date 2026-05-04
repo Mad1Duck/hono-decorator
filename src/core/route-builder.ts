@@ -142,7 +142,8 @@ export class HonoRouteBuilder {
 
   static build<T>(
     ControllerClass: ControllerConstructor<T>,
-    platform?: 'mobile' | 'web'
+    platform?: 'mobile' | 'web',
+    options?: { excludePrivate?: boolean }
   ): Hono {
     const app = new Hono();
 
@@ -166,8 +167,11 @@ export class HonoRouteBuilder {
       ControllerClass as ConcreteConstructor<T>
     ) as T & ControllerInstance;
 
-    /* ----- Filter Routes by Platform ----- */
+    const proto = (ControllerClass as unknown as { prototype: object }).prototype;
+
+    /* ----- Filter Routes by Platform & Visibility ----- */
     const platformRoutes = routes.filter((route) => {
+      if (options?.excludePrivate && Reflect.getMetadata('isPrivate', proto, route.handlerName)) return false;
       if (!platform) return true;
       return route.platform === 'all' || route.platform === platform;
     });

@@ -191,6 +191,178 @@ container.registerSingleton(Database, new Database(config));
 container.registerFactory(Redis, () => new Redis(process.env.REDIS_URL));
 ```
 
+### Database / external client integration
+
+For external objects that are not classes (Drizzle ORM, Prisma, Redis clients, etc.), use `registerInstance` with a symbol token:
+
+```ts
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+import { container, Inject, Injectable } from 'hono-forge';
+
+// 1. Define a token
+export const DB = Symbol('db');
+export type AppDb = ReturnType<typeof drizzle>;
+
+// 2. Register the instance once at startup (before building routes)
+const client = postgres(process.env.DATABASE_URL!);
+container.registerInstance(DB, drizzle(client));
+
+// 3. Inject into any service
+@Injectable()
+export class UserRepo {
+  constructor(@Inject(DB) private db: AppDb) {}
+
+  findAll() {
+    return this.db.select().from(users);
+  }
+}
+```
+
+The same pattern works for any external dependency — Prisma client, Redis, S3, Resend, etc.:
+
+```ts
+export const REDIS   = Symbol('redis');
+export const MAILER  = Symbol('mailer');
+
+container.registerInstance(REDIS,  new Redis(process.env.REDIS_URL));
+container.registerInstance(MAILER, new Resend(process.env.RESEND_KEY));
+```
+
+> **`registerInstance` vs `registerSingleton`**: both do the same thing. `registerInstance` is the recommended name when registering a pre-built external object. `registerSingleton` is kept for backwards compatibility.
+
+### Table column schemas with `defineSchemas`
+
+`defineSchemas` generates a consistent `{ select, insert, update }` schema set from any two Zod schemas. It works with `drizzle-zod`, `zod-prisma`, or hand-written schemas.
+
+```ts
+import { defineSchemas } from 'hono-forge';
+import { createSelectSchema, createInsertSchema } from 'drizzle-zod';
+import { pgTable, serial, varchar, text } from 'drizzle-orm/pg-core';
+
+const users = pgTable('users', {
+  id:    serial('id').primaryKey(),
+  name:  varchar('name', { length: 255 }).notNull(),
+  email: text('email').notNull(),
+});
+
+// Auto-generate from table columns
+export const UserSchemas = defineSchemas(
+  createSelectSchema(users),   // full row — id + name + email
+  createInsertSchema(users),   // insert — name + email (id auto-generated)
+);
+
+// UserSchemas.select  — full row (GET responses, @ValidateResult)
+// UserSchemas.insert  — required fields (POST body)
+// UserSchemas.update  — all fields optional (PATCH body)
+```
+
+Use directly with parameter decorators and OpenAPI:
+
+```ts
+@Controller('/users')
+class UserController {
+  @Post()
+  create(@ValidatedBody(UserSchemas.insert) body: typeof UserSchemas.insert._output) {
+    return this.repo.create(body);
+  }
+
+  @Patch('/:id')
+  update(
+    @Param('id') id: string,
+    @ValidatedBody(UserSchemas.update) body: typeof UserSchemas.update._output,
+  ) {
+    return this.repo.update(id, body);
+  }
+
+  @Get('/:id')
+  @ApiResponse(200, { schema: UserSchemas.select })
+  getOne(@Param('id') id: string) {
+    return this.repo.findById(id);
+  }
+}
+```
+
+Works without Drizzle too — pass any two Zod objects:
+
+```ts
+export const PostSchemas = defineSchemas(
+  z.object({ id: z.number(), title: z.string(), content: z.string() }),
+  z.object({ title: z.string().min(1), content: z.string().min(1) }),
+);
+```
+
+#### Custom update schema
+
+When PATCH has different validation rules than a partial POST (e.g. email cannot be changed), pass a custom `update` schema via the third argument:
+
+```ts
+const insert = z.object({ name: z.string().min(1), email: z.string().email() });
+
+export const UserSchemas = defineSchemas(
+  z.object({ id: z.number(), name: z.string(), email: z.string() }),
+  insert,
+  { update: insert.omit({ email: true }).partial() },
+);
+
+// UserSchemas.update — only { name? } — email is excluded from PATCH
+```
+
+---
+
+## Pagination
+
+### `paginate`
+
+Wraps a data array and total count into a standard `{ data, meta }` response:
+
+```ts
+import { paginate } from 'hono-forge';
+
+const [data, total] = await db.select().from(users).limit(limit).offset((page - 1) * limit);
+return paginate(data, total, { page, limit });
+
+// Returns:
+// {
+//   data: [...],
+//   meta: { page: 1, limit: 20, total: 95, totalPages: 5, hasNext: true, hasPrev: false }
+// }
+```
+
+### `PaginationQuerySchema`
+
+Zod schema for standard `page` / `limit` query params. Use with `@ValidatedQuery`:
+
+```ts
+import { PaginationQuerySchema } from 'hono-forge';
+import type { PaginationQuery } from 'hono-forge';
+
+@Get()
+list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) {
+  const { page, limit } = q; // page defaults to 1, limit defaults to 20 (max 100)
+  const [data, total] = await this.repo.findAndCount({ limit, offset: (page - 1) * limit });
+  return paginate(data, total, q);
+}
+```
+
+### `paginatedSchema`
+
+Wraps an item schema into a full paginated response schema for `@ApiResponse` or `@ValidateResult`:
+
+```ts
+import { paginatedSchema, PaginationQuerySchema } from 'hono-forge';
+
+const UserListSchema = paginatedSchema(UserSchemas.select);
+
+@Get()
+@ApiResponse(200, { schema: UserListSchema })
+@ValidateResult(UserListSchema)
+async list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) {
+  const [data, total] = await this.repo.findAndCount(q);
+  return paginate(data, total, q);
+}
+```
+
 ---
 
 ## Controllers
@@ -349,6 +521,32 @@ HonoRouteBuilder.configure({
 @RequirePermission('users:read')           // PermissionGuard — needs ALL
 @RequireAnyPermission('reports:read', 'admin:all') // PermissionGuard — needs ONE
 @Public()                                  // skips guards entirely
+@Private()                                 // marks route as internal-only
+```
+
+### `@Private`
+
+Marks a route as internal-only. It does **not** affect normal request handling — a private route is still registered and accessible. The flag is only meaningful when you pass `{ excludePrivate: true }` to `build()`:
+
+```ts
+// internal-only health check — skip it on the public-facing Hono instance
+@Controller('/admin')
+class AdminController {
+  @Get('/healthz')
+  @Private()
+  health() { return { status: 'ok' }; }
+
+  @Get('/dashboard')
+  dashboard() { return { ... }; }
+}
+
+// Public instance — private routes excluded
+const publicApp = new Hono();
+publicApp.route('/', HonoRouteBuilder.build(AdminController, undefined, { excludePrivate: true }));
+
+// Internal instance — all routes included (default)
+const internalApp = new Hono();
+internalApp.route('/', HonoRouteBuilder.build(AdminController));
 ```
 
 ---
@@ -701,17 +899,62 @@ Expects `this.logger` to implement `{ info(data, msg?): void }` (compatible with
 
 ### `@Transaction`
 
-Wraps the method inside `this.db.transaction()`. Compatible with Drizzle ORM, Kysely, and any client that exposes `.transaction(fn)`.
+Wraps the method inside a database transaction. Requires `this.db` on the instance.
+
+By default uses `.transaction(fn)` — compatible with Drizzle, Knex, and TypeORM. Pass a custom executor for ORMs with different APIs:
 
 ```ts
+// Drizzle / Knex / TypeORM — default, no executor needed
 @Transaction()
 async transfer(from: string, to: string, amount: number) {
-  await this.db.update(accounts).set(...);
-  await this.db.update(accounts).set(...);
+  await this.db.update(accounts)...;
+}
+
+// Prisma — $transaction instead of .transaction
+@Transaction((db: PrismaClient, run) => db.$transaction(run))
+async transfer() { ... }
+
+// Kysely — .transaction().execute()
+@Transaction((db: Kysely<DB>, run) => db.transaction().execute(run))
+async transfer() { ... }
+```
+
+The transaction is propagated via `AsyncLocalStorage`, so any nested repository that calls `useTransaction()` automatically receives the active `tx` — no manual passing required:
+
+```ts
+import { useTransaction } from 'hono-forge';
+
+@Injectable()
+class UserRepo {
+  constructor(private db: DrizzleDb) {}
+
+  async create(data: NewUser) {
+    const tx = useTransaction<DrizzleDb>() ?? this.db;
+    return tx.insert(users).values(data);
+  }
+}
+
+@Injectable()
+class AccountService {
+  constructor(private db: DrizzleDb, private repo: UserRepo) {}
+
+  @Transaction()
+  async onboard(data: NewUser) {
+    // repo.create() picks up the same tx automatically via useTransaction()
+    await this.repo.create(data);
+    await this.db.insert(accounts).values({ userId: data.id });
+  }
 }
 ```
 
-Throws at call-time if `this.db` is not set on the instance.
+Export `TransactionExecutor` type to type your custom executors:
+
+```ts
+import type { TransactionExecutor } from 'hono-forge';
+
+const prismaExecutor: TransactionExecutor<PrismaClient> =
+  (db, run) => db.$transaction(run);
+```
 
 ---
 

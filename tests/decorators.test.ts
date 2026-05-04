@@ -30,6 +30,7 @@ import {
   RequireAnyPermission,
   RateLimit,
   Public,
+  Private,
   Middleware,
   Cache,
   Retry,
@@ -41,8 +42,14 @@ import {
   ValidateResult,
   Audit,
   Transaction,
+  defineSchemas,
+  useTransaction,
+  paginate,
+  paginatedSchema,
+  PaginationQuerySchema,
   METADATA_KEYS,
 } from '../src';
+import type { TransactionExecutor } from '../src';
 import type {
   RouteMetadata,
   GuardMetadata,
@@ -325,6 +332,30 @@ describe('Guard decorators', () => {
   it('@Public sets isPublic flag on the method', () => {
     const isPublic = Reflect.getMetadata('isPublic', secureProto, 'publicRoute');
     expect(isPublic).toBe(true);
+  });
+});
+
+/* ================= PRIVATE ================= */
+
+@Controller('/priv-test')
+class PrivateRoutes {
+  @Get('/open')
+  open() {}
+
+  @Get('/hidden')
+  @Private()
+  hidden() {}
+}
+
+describe('@Private', () => {
+  const proto = PrivateRoutes.prototype;
+
+  it('sets isPrivate metadata on the annotated method', () => {
+    expect(Reflect.getMetadata('isPrivate', proto, 'hidden')).toBe(true);
+  });
+
+  it('does not set isPrivate on non-annotated methods', () => {
+    expect(Reflect.getMetadata('isPrivate', proto, 'open')).toBeUndefined();
   });
 });
 
@@ -673,5 +704,250 @@ describe('@Transaction', () => {
       async save() { return 'saved'; }
     }
     await expect(new Repo().save()).rejects.toThrow('@Transaction');
+  });
+
+  it('uses a custom executor (Prisma-style $transaction)', async () => {
+    let txUsed = false;
+    const prismaExecutor: TransactionExecutor = (db, run) => {
+      txUsed = true;
+      return (db as { $transaction: typeof run }).$transaction(run);
+    };
+
+    const fakePrisma = {
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({}),
+    };
+
+    class Repo {
+      db = fakePrisma;
+      @Transaction(prismaExecutor)
+      async save() { return 'prisma-saved'; }
+    }
+
+    const result = await new Repo().save();
+    expect(result).toBe('prisma-saved');
+    expect(txUsed).toBe(true);
+  });
+
+  it('uses a custom executor (Kysely-style transaction().execute)', async () => {
+    let txUsed = false;
+    const kyselyExecutor: TransactionExecutor = (db, run) => {
+      txUsed = true;
+      return (db as { transaction: () => { execute: typeof run } })
+        .transaction()
+        .execute(run);
+    };
+
+    const fakeKysely = {
+      transaction: () => ({
+        execute: async (fn: (tx: unknown) => Promise<unknown>) => fn({}),
+      }),
+    };
+
+    class Repo {
+      db = fakeKysely;
+      @Transaction(kyselyExecutor)
+      async save() { return 'kysely-saved'; }
+    }
+
+    const result = await new Repo().save();
+    expect(result).toBe('kysely-saved');
+    expect(txUsed).toBe(true);
+  });
+});
+
+/* ================= defineSchemas ================= */
+
+describe('defineSchemas', () => {
+  it('exposes select, insert, and update schemas', () => {
+    const schemas = defineSchemas(
+      z.object({ id: z.number(), name: z.string() }),
+      z.object({ name: z.string().min(1), email: z.string().email() }),
+    );
+
+    expect(schemas.select).toBeDefined();
+    expect(schemas.insert).toBeDefined();
+    expect(schemas.update).toBeDefined();
+  });
+
+  it('insert validates required fields', () => {
+    const schemas = defineSchemas(
+      z.object({ id: z.number(), name: z.string() }),
+      z.object({ name: z.string().min(1), email: z.string().email() }),
+    );
+    const result = schemas.insert.safeParse({ name: 'Alice', email: 'alice@example.com' });
+    expect(result.success).toBe(true);
+  });
+
+  it('update makes all insert fields optional', () => {
+    const schemas = defineSchemas(
+      z.object({ id: z.number(), name: z.string() }),
+      z.object({ name: z.string().min(1), email: z.string().email() }),
+    );
+    // PATCH with only one field — should pass
+    const result = schemas.update.safeParse({ name: 'Bob' });
+    expect(result.success).toBe(true);
+  });
+
+  it('select validates full row shape', () => {
+    const schemas = defineSchemas(
+      z.object({ id: z.number(), name: z.string() }),
+      z.object({ name: z.string() }),
+    );
+    expect(schemas.select.safeParse({ id: 1, name: 'Alice' }).success).toBe(true);
+    expect(schemas.select.safeParse({ name: 'Alice' }).success).toBe(false);
+  });
+
+  it('accepts a custom update schema via options', () => {
+    const insert = z.object({ name: z.string().min(1), email: z.string().email() });
+    const schemas = defineSchemas(
+      z.object({ id: z.number(), name: z.string(), email: z.string() }),
+      insert,
+      { update: insert.omit({ email: true }).partial() },
+    );
+    // email excluded — stripped from output, not in the schema shape
+    const parsed = schemas.update.safeParse({ name: 'Bob', email: 'new@example.com' });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect('email' in parsed.data).toBe(false);  // email was stripped
+      expect(parsed.data.name).toBe('Bob');
+    }
+    // name only — should pass
+    expect(schemas.update.safeParse({ name: 'Bob' }).success).toBe(true);
+    // empty patch — should pass (all fields optional)
+    expect(schemas.update.safeParse({}).success).toBe(true);
+  });
+});
+
+/* ================= useTransaction ================= */
+
+describe('useTransaction', () => {
+  it('returns undefined outside a @Transaction context', () => {
+    expect(useTransaction()).toBeUndefined();
+  });
+
+  it('returns the tx object inside @Transaction', async () => {
+    const fakeTx = { isTx: true };
+    let captured: unknown;
+
+    class Repo {
+      db = { transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fakeTx) };
+
+      @Transaction()
+      async save() {
+        captured = useTransaction();
+        return 'ok';
+      }
+    }
+
+    await new Repo().save();
+    expect(captured).toBe(fakeTx);
+  });
+
+  it('propagates tx to a nested call without passing it explicitly', async () => {
+    const fakeTx = { query: 'tx-query' };
+    let repoSawTx = false;
+
+    class UserRepo {
+      db = {};
+      async findAll() {
+        const tx = useTransaction();
+        repoSawTx = tx === fakeTx;
+      }
+    }
+
+    class UserService {
+      db = { transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fakeTx) };
+      repo = new UserRepo();
+
+      @Transaction()
+      async run() {
+        await this.repo.findAll();
+      }
+    }
+
+    await new UserService().run();
+    expect(repoSawTx).toBe(true);
+  });
+
+  it('tx context is cleared after @Transaction completes', async () => {
+    class Svc {
+      db = { transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({}) };
+      @Transaction()
+      async run() { return 'done'; }
+    }
+    await new Svc().run();
+    expect(useTransaction()).toBeUndefined();
+  });
+});
+
+/* ================= paginate ================= */
+
+describe('paginate', () => {
+  it('calculates totalPages and hasNext/hasPrev correctly', () => {
+    const result = paginate(['a', 'b', 'c'], 95, { page: 1, limit: 20 });
+    expect(result.meta.totalPages).toBe(5);
+    expect(result.meta.hasNext).toBe(true);
+    expect(result.meta.hasPrev).toBe(false);
+  });
+
+  it('last page: hasNext false, hasPrev true', () => {
+    const result = paginate(['x'], 95, { page: 5, limit: 20 });
+    expect(result.meta.hasNext).toBe(false);
+    expect(result.meta.hasPrev).toBe(true);
+  });
+
+  it('single page: hasNext and hasPrev both false', () => {
+    const result = paginate([1, 2], 2, { page: 1, limit: 20 });
+    expect(result.meta.hasNext).toBe(false);
+    expect(result.meta.hasPrev).toBe(false);
+  });
+
+  it('data is passed through unchanged', () => {
+    const data = [{ id: 1 }, { id: 2 }];
+    expect(paginate(data, 2, { page: 1, limit: 10 }).data).toBe(data);
+  });
+});
+
+describe('paginatedSchema', () => {
+  it('validates a correct paginated response', () => {
+    const schema = paginatedSchema(z.object({ id: z.number() }));
+    const result = schema.safeParse({
+      data: [{ id: 1 }],
+      meta: { page: 1, limit: 20, total: 1, totalPages: 1, hasNext: false, hasPrev: false },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects invalid item shape', () => {
+    const schema = paginatedSchema(z.object({ id: z.number() }));
+    const result = schema.safeParse({
+      data: [{ id: 'not-a-number' }],
+      meta: { page: 1, limit: 20, total: 1, totalPages: 1, hasNext: false, hasPrev: false },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('PaginationQuerySchema', () => {
+  it('coerces string page/limit to numbers', () => {
+    const result = PaginationQuerySchema.safeParse({ page: '2', limit: '50' });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.page).toBe(2);
+      expect(result.data.limit).toBe(50);
+    }
+  });
+
+  it('applies defaults when page/limit are absent', () => {
+    const result = PaginationQuerySchema.safeParse({});
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.page).toBe(1);
+      expect(result.data.limit).toBe(20);
+    }
+  });
+
+  it('rejects limit above 100', () => {
+    expect(PaginationQuerySchema.safeParse({ limit: '101' }).success).toBe(false);
   });
 });

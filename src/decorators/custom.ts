@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import type { ZodTypeAny } from 'zod';
+import { txStorage } from '../utils/transaction';
 
 /* ================= TYPES ================= */
 
@@ -19,6 +20,21 @@ type LoggerLike = {
 type DbLike = {
   transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T>;
 };
+
+/**
+ * Custom transaction executor — receives the db instance and a run function,
+ * and is responsible for wrapping `run` inside a transaction.
+ *
+ * @example Prisma
+ * (db, run) => db.$transaction(run)
+ *
+ * @example Kysely
+ * (db, run) => db.transaction().execute(run)
+ */
+export type TransactionExecutor<TDb = unknown> = (
+  db: TDb,
+  run: (tx: TDb) => Promise<unknown>
+) => Promise<unknown>;
 
 /* ================= THROTTLE ================= */
 
@@ -155,7 +171,33 @@ export function Audit(options: { action: string; }): MethodDecorator {
 
 /* ================= TRANSACTION ================= */
 
-export function Transaction(): MethodDecorator {
+const defaultExecutor: TransactionExecutor = (db, run) =>
+  (db as DbLike).transaction((tx) => run(tx as typeof db));
+
+/**
+ * Wraps a method inside a database transaction.
+ *
+ * Requires `this.db` to be set on the class instance.
+ * The `tx` object replaces `this.db` for the duration of the call,
+ * so nested repository calls automatically use the transaction.
+ *
+ * Pass a custom executor to support ORMs with non-standard transaction APIs.
+ *
+ * @example Drizzle / Knex / TypeORM (default — no executor needed)
+ * @Transaction()
+ * async transfer() { ... }
+ *
+ * @example Prisma
+ * @Transaction((db: PrismaClient, run) => db.$transaction(run))
+ * async transfer() { ... }
+ *
+ * @example Kysely
+ * @Transaction((db: Kysely<DB>, run) => db.transaction().execute(run))
+ * async transfer() { ... }
+ */
+export function Transaction(
+  executor?: TransactionExecutor
+): MethodDecorator {
   return <T>(
     target: object,
     propertyKey: string | symbol,
@@ -164,8 +206,10 @@ export function Transaction(): MethodDecorator {
     const original = descriptor.value as AnyMethod | undefined;
     if (!original) return descriptor;
 
+    const exec = executor ?? defaultExecutor;
+
     descriptor.value = (async function (
-      this: { db?: DbLike; },
+      this: { db?: unknown },
       ...args: unknown[]
     ) {
       if (!this.db) {
@@ -174,18 +218,10 @@ export function Transaction(): MethodDecorator {
         );
       }
 
-      return this.db.transaction(async (tx) => {
-        const originalDb = this.db;
-        this.db = tx as DbLike;
-
-        try {
-          const result = await original.apply(this, args);
-          this.db = originalDb;
-          return result;
-        } catch (err) {
-          this.db = originalDb;
-          throw err;
-        }
+      return exec(this.db, async (tx) => {
+        // Store tx in AsyncLocalStorage so injected repositories can pick
+        // it up via useTransaction() without being passed tx explicitly.
+        return txStorage.run(tx, () => original.apply(this, args));
       });
     }) as T;
 

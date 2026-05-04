@@ -194,28 +194,7 @@ export function Private(): MethodDecorator {
     propertyKey: string | symbol,
     descriptor: TypedPropertyDescriptor<T>
   ) => {
-    const ctor = target.constructor;
-
-    const routes =
-      (Reflect.getMetadata(
-        METADATA_KEYS.ROUTES,
-        ctor
-      ) as RouteMetadata[] | undefined) ?? [];
-
-    const route = routes.find(
-      (r) => r.handlerName === propertyKey.toString()
-    );
-
-    if (route) {
-      route.isPrivate = true;
-    }
-
-    Reflect.defineMetadata(
-      METADATA_KEYS.ROUTES,
-      routes,
-      ctor
-    );
-
+    Reflect.defineMetadata('isPrivate', true, target, propertyKey);
     return descriptor;
   };
 }

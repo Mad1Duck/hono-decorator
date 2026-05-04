@@ -19,6 +19,7 @@ import {
   RequireAuth,
   RequireRole,
   Public,
+  Private,
   RateLimit,
   Middleware,
   Use,
@@ -846,6 +847,37 @@ describe('file upload decorators', () => {
       const body = await res.json() as { fileName: string; field: string };
       expect(body.fileName).toBe('report.pdf');
       expect(body.field).toBe('important');
+    });
+  });
+
+  /* -------- @Private / excludePrivate -------- */
+
+  describe('@Private / excludePrivate', () => {
+    @Controller('/visibility')
+    class VisibilityController {
+      @Get('/public') @Public()
+      pub() { return { route: 'public' }; }
+
+      @Get('/internal') @Public() @Private()
+      internal() { return { route: 'internal' }; }
+    }
+
+    it('includes private routes by default', async () => {
+      const app = HonoRouteBuilder.build(VisibilityController);
+      const res = await app.fetch(makeRequest('/visibility/internal'));
+      expect(res.status).toBe(200);
+    });
+
+    it('excludes private routes when excludePrivate: true', async () => {
+      const app = HonoRouteBuilder.build(VisibilityController, undefined, { excludePrivate: true });
+      const res = await app.fetch(makeRequest('/visibility/internal'));
+      expect(res.status).toBe(404);
+    });
+
+    it('still serves non-private routes when excludePrivate: true', async () => {
+      const app = HonoRouteBuilder.build(VisibilityController, undefined, { excludePrivate: true });
+      const res = await app.fetch(makeRequest('/visibility/public'));
+      expect(res.status).toBe(200);
     });
   });
 });
