@@ -11,6 +11,7 @@ import {
   All,
   WebSocket,
   Body,
+  ValidatedBody,
   Param,
   Query,
   User,
@@ -33,6 +34,8 @@ import {
   HonoRouteBuilder,
   container,
   fromModules,
+  getTraceId,
+  HttpException,
 } from '../src';
 import type { Context, Next } from 'hono';
 import { z } from 'zod';
@@ -63,7 +66,7 @@ class ItemStore {
 
 @Injectable()
 class ItemService {
-  constructor(private store: ItemStore) {}
+  constructor(private store: ItemStore) { }
   getAll() { return this.store.getAll(); }
   getById(id: string) { return this.store.getById(id); }
   create(name: string) { return this.store.create(name); }
@@ -77,7 +80,7 @@ const CreateItemSchema = z.object({ name: z.string().min(1) });
 // so Hono matches static paths before dynamic ones
 @Controller('/items')
 class ItemController {
-  constructor(private svc: ItemService) {}
+  constructor(private svc: ItemService) { }
 
   @Get()
   @Public()
@@ -106,7 +109,7 @@ class SecureController {
 
   @Delete('/:id')
   @RequireRole('admin')
-  adminDelete(@Param('id') id: string, @User() user: { name: string }) {
+  adminDelete(@Param('id') id: string, @User() user: { name: string; }) {
     return { deleted: id, by: user.name };
   }
 }
@@ -163,7 +166,7 @@ class ExtendedMethodController {
 class WsController {
   @WebSocket()
   connect() {
-    return { onMessage: (_e: unknown, _ws: unknown) => {} };
+    return { onMessage: (_e: unknown, _ws: unknown) => { } };
   }
 }
 
@@ -216,6 +219,70 @@ describe('HonoRouteBuilder', () => {
 
   /* -------- security: throw at build time -------- */
 
+  /* -------- strictValidation -------- */
+
+  describe('strictValidation', () => {
+    @Controller('/unvalidated')
+    class UnvalidatedController {
+      @Post() @Public()
+      create(@Body() body: unknown) { return body; }
+    }
+
+    @Controller('/validated')
+    class ValidatedController {
+      @Post() @Public()
+      create(@ValidatedBody(z.object({ name: z.string() })) body: { name: string; }) { return body; }
+    }
+
+    it('warns by default when POST uses @Body() without schema', () => {
+      const warns: string[] = [];
+      const orig = console.warn;
+      console.warn = (msg: string) => warns.push(msg);
+      HonoRouteBuilder.build(UnvalidatedController);
+      console.warn = orig;
+      expect(warns.some(w => w.includes('unvalidated'))).toBe(true);
+    });
+
+    it('does NOT warn when schema is provided', () => {
+      HonoRouteBuilder.configure({ guardExecutor: async () => true });
+      const warns: string[] = [];
+      const orig = console.warn;
+      console.warn = (msg: string) => warns.push(msg);
+      HonoRouteBuilder.build(ValidatedController);
+      console.warn = orig;
+      expect(warns.filter(w => w.includes('hono-forge'))).toHaveLength(0);
+    });
+
+    it('throws when strictValidation is "error" and schema is missing', () => {
+      HonoRouteBuilder.configure({ strictValidation: 'error' });
+      expect(() => HonoRouteBuilder.build(UnvalidatedController)).toThrow(/unvalidated/i);
+    });
+
+    it('does NOT warn when strictValidation is "off"', () => {
+      HonoRouteBuilder.configure({ strictValidation: 'off' });
+      const warns: string[] = [];
+      const orig = console.warn;
+      console.warn = (msg: string) => warns.push(msg);
+      HonoRouteBuilder.build(UnvalidatedController);
+      console.warn = orig;
+      expect(warns.filter(w => w.includes('hono-forge'))).toHaveLength(0);
+    });
+
+    it('does NOT warn for GET routes without schema', () => {
+      @Controller('/get-no-schema')
+      class GetCtrl {
+        @Get() @Public()
+        list() { return []; }
+      }
+      const warns: string[] = [];
+      const orig = console.warn;
+      console.warn = (msg: string) => warns.push(msg);
+      HonoRouteBuilder.build(GetCtrl);
+      console.warn = orig;
+      expect(warns.filter(w => w.includes('hono-forge'))).toHaveLength(0);
+    });
+  });
+
   describe('security guards', () => {
     it('throws at build() when guards present but no guardExecutor', () => {
       expect(() => HonoRouteBuilder.build(SecureController)).toThrow(/guardExecutor/);
@@ -258,7 +325,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(ItemController);
       const res = await app.fetch(makeRequest('/items/1'));
       expect(res.status).toBe(200);
-      const body = await res.json() as { id: string };
+      const body = await res.json() as { id: string; };
       expect(body.id).toBe('1');
     });
 
@@ -270,7 +337,7 @@ describe('HonoRouteBuilder', () => {
         body: JSON.stringify({ name: 'Cherry' }),
       }));
       expect(res.status).toBe(200);
-      const body = await res.json() as { name: string };
+      const body = await res.json() as { name: string; };
       expect(body.name).toBe('Cherry');
     });
   });
@@ -281,7 +348,7 @@ describe('HonoRouteBuilder', () => {
     it('@Param resolves route parameter', async () => {
       const app = HonoRouteBuilder.build(ItemController);
       const res = await app.fetch(makeRequest('/items/2'));
-      const body = await res.json() as { id: string };
+      const body = await res.json() as { id: string; };
       expect(body.id).toBe('2');
     });
 
@@ -289,7 +356,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(ItemController);
       const res = await app.fetch(makeRequest('/items/search?name=apple&page=1'));
       expect(res.status).toBe(200);
-      const body = await res.json() as { query: Record<string, string> };
+      const body = await res.json() as { query: Record<string, string>; };
       expect(body.query['name']).toBe('apple');
       expect(body.query['page']).toBe('1');
     });
@@ -302,7 +369,7 @@ describe('HonoRouteBuilder', () => {
         body: JSON.stringify({ name: '' }),
       }));
       expect(res.status).toBe(400);
-      const body = await res.json() as { error: { code: string } };
+      const body = await res.json() as { error: { code: string; }; };
       expect(body.error.code).toBe('VALIDATION_ERROR');
     });
   });
@@ -317,7 +384,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(SecureController);
       const res = await app.fetch(makeRequest('/secure'));
       expect(res.status).toBe(401);
-      const body = await res.json() as { error: { code: string } };
+      const body = await res.json() as { error: { code: string; }; };
       expect(body.error.code).toBe('UNAUTHORIZED');
     });
 
@@ -328,7 +395,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(SecureController);
       const res = await app.fetch(makeRequest('/secure'));
       expect(res.status).toBe(403);
-      const body = await res.json() as { error: { code: string } };
+      const body = await res.json() as { error: { code: string; }; };
       expect(body.error.code).toBe('FORBIDDEN');
     });
 
@@ -361,7 +428,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(SecureController);
       const res = await app.fetch(makeRequest('/secure/1', { method: 'DELETE' }));
       expect(res.status).toBe(200);
-      const body = await res.json() as { by: string };
+      const body = await res.json() as { by: string; };
       expect(body.by).toBe('Bob');
     });
   });
@@ -444,7 +511,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(ErrController);
       const res = await app.fetch(makeRequest('/err-test'));
       expect(res.status).toBe(500);
-      const body = await res.json() as { error: { code: string } };
+      const body = await res.json() as { error: { code: string; }; };
       expect(body.error.code).toBe('INTERNAL_SERVER_ERROR');
     });
 
@@ -492,7 +559,7 @@ describe('HonoRouteBuilder', () => {
         body: JSON.stringify({ name: 'Mango' }),
       }));
       expect(res.status).toBe(200);
-      const body = await res.json() as { id: string; name: string };
+      const body = await res.json() as { id: string; name: string; };
       expect(body.id).toBe('1');
       expect(body.name).toBe('Mango');
     });
@@ -505,7 +572,7 @@ describe('HonoRouteBuilder', () => {
         body: JSON.stringify({ name: '' }),
       }));
       expect(res.status).toBe(400);
-      const body = await res.json() as { error: { code: string } };
+      const body = await res.json() as { error: { code: string; }; };
       expect(body.error.code).toBe('VALIDATION_ERROR');
     });
   });
@@ -517,7 +584,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(QuerySchemaController);
       const res = await app.fetch(makeRequest('/qschema-test?search=hello&limit=5'));
       expect(res.status).toBe(200);
-      const body = await res.json() as { search: string; limit: number };
+      const body = await res.json() as { search: string; limit: number; };
       expect(body.search).toBe('hello');
       expect(body.limit).toBe(5);
     });
@@ -526,7 +593,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(QuerySchemaController);
       const res = await app.fetch(makeRequest('/qschema-test?limit=notanumber'));
       expect(res.status).toBe(400);
-      const body = await res.json() as { error: { code: string } };
+      const body = await res.json() as { error: { code: string; }; };
       expect(body.error.code).toBe('VALIDATION_ERROR');
     });
 
@@ -534,7 +601,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(QuerySchemaController);
       const res = await app.fetch(makeRequest('/qschema-test'));
       expect(res.status).toBe(200);
-      const body = await res.json() as { search: null; limit: null };
+      const body = await res.json() as { search: null; limit: null; };
       expect(body.search).toBeNull();
       expect(body.limit).toBeNull();
     });
@@ -547,7 +614,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(WebController);
       const res = await app.fetch(makeRequest('/web/v1/platform-test'));
       expect(res.status).toBe(200);
-      const body = await res.json() as { platform: string };
+      const body = await res.json() as { platform: string; };
       expect(body.platform).toBe('web');
     });
 
@@ -555,7 +622,7 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(MobileController);
       const res = await app.fetch(makeRequest('/mobile/v1/platform-test'));
       expect(res.status).toBe(200);
-      const body = await res.json() as { platform: string };
+      const body = await res.json() as { platform: string; };
       expect(body.platform).toBe('mobile');
     });
   });
@@ -619,7 +686,7 @@ describe('HonoRouteBuilder', () => {
       @Controller('/mod-a')
       class ModAController { @Get() @Public() list() { return []; } }
 
-      class NotAController {}
+      class NotAController { }
 
       const modules = {
         './mod-a.ts': { ModAController, NotAController, someValue: 42 },
@@ -647,7 +714,7 @@ describe('HonoRouteBuilder', () => {
 
     it('returns empty array when no @Controller classes found', () => {
       const modules = {
-        './plain.ts': { PlainClass: class PlainClass {}, value: 123 },
+        './plain.ts': { PlainClass: class PlainClass { }, value: 123 },
       } as Record<string, Record<string, unknown>>;
       expect(fromModules(modules)).toHaveLength(0);
     });
@@ -734,7 +801,7 @@ describe('common middleware decorators', () => {
 /* ================= FILE UPLOAD ================= */
 
 describe('file upload decorators', () => {
-  function makeMultipart(path: string, fields: Record<string, string | { name: string; content: string; type?: string }>) {
+  function makeMultipart(path: string, fields: Record<string, string | { name: string; content: string; type?: string; }>) {
     const form = new FormData();
     for (const [key, value] of Object.entries(fields)) {
       if (typeof value === 'string') {
@@ -757,7 +824,7 @@ describe('file upload decorators', () => {
       }
       const app = HonoRouteBuilder.build(UploadCtrl);
       const res = await app.fetch(makeMultipart('/upload', { avatar: { name: 'pic.png', content: 'abc', type: 'image/png' } }));
-      const body = await res.json() as { name: string; size: number };
+      const body = await res.json() as { name: string; size: number; };
       expect(body.name).toBe('pic.png');
       expect(body.size).toBe(3);
     });
@@ -772,7 +839,7 @@ describe('file upload decorators', () => {
       }
       const app = HonoRouteBuilder.build(UploadNullCtrl);
       const res = await app.fetch(makeMultipart('/upload-null', { other: 'value' }));
-      const body = await res.json() as { isNull: boolean };
+      const body = await res.json() as { isNull: boolean; };
       expect(body.isNull).toBe(true);
     });
   });
@@ -791,7 +858,7 @@ describe('file upload decorators', () => {
       form.append('photos', new File(['a'], 'a.png', { type: 'image/png' }));
       form.append('photos', new File(['bb'], 'b.png', { type: 'image/png' }));
       const res = await app.fetch(new Request('http://test.local/upload-multi', { method: 'POST', body: form }));
-      const body = await res.json() as { count: number; names: string[] };
+      const body = await res.json() as { count: number; names: string[]; };
       expect(body.count).toBe(2);
       expect(body.names).toContain('a.png');
     });
@@ -810,7 +877,7 @@ describe('file upload decorators', () => {
       form.append('img', new File(['y'], 'img.jpg'));
       form.append('name', 'text-field');
       const res = await app.fetch(new Request('http://test.local/upload-all', { method: 'POST', body: form }));
-      const body = await res.json() as { count: number };
+      const body = await res.json() as { count: number; };
       expect(body.count).toBe(2);
     });
   });
@@ -826,7 +893,7 @@ describe('file upload decorators', () => {
       }
       const app = HonoRouteBuilder.build(FormCtrl);
       const res = await app.fetch(makeMultipart('/form', { name: 'Alice', age: '30' }));
-      const body = await res.json() as { name: string; age: string };
+      const body = await res.json() as { name: string; age: string; };
       expect(body.name).toBe('Alice');
       expect(body.age).toBe('30');
     });
@@ -844,7 +911,7 @@ describe('file upload decorators', () => {
       form.append('doc', new File(['hello'], 'report.pdf'));
       form.append('note', 'important');
       const res = await app.fetch(new Request('http://test.local/form-multi-param', { method: 'POST', body: form }));
-      const body = await res.json() as { fileName: string; field: string };
+      const body = await res.json() as { fileName: string; field: string; };
       expect(body.fileName).toBe('report.pdf');
       expect(body.field).toBe('important');
     });
@@ -878,6 +945,252 @@ describe('file upload decorators', () => {
       const app = HonoRouteBuilder.build(VisibilityController, undefined, { excludePrivate: true });
       const res = await app.fetch(makeRequest('/visibility/public'));
       expect(res.status).toBe(200);
+    });
+  });
+
+  /* -------- middleware exception formatting -------- */
+
+  describe('middleware exception formatting', () => {
+    it('HttpException thrown in class middleware returns correct status + structured JSON', async () => {
+      const authMw = async (_c: Context, _next: Next) => {
+        throw HttpException.unauthorized('Token expired');
+      };
+
+      @Controller('/mw-http-ex')
+      @Middleware(authMw)
+      class MwHttpExController {
+        @Get() @Public()
+        handle() { return { ok: true }; }
+      }
+
+      HonoRouteBuilder.configure({});
+      const app = HonoRouteBuilder.build(MwHttpExController);
+      const res = await app.fetch(makeRequest('/mw-http-ex'));
+      expect(res.status).toBe(401);
+      const body = await res.json() as { status: string; error: { code: string; message: string; }; };
+      expect(body.status).toBe('error');
+      expect(body.error.code).toBe('UNAUTHORIZED');
+      expect(body.error.message).toBe('Token expired');
+    });
+
+    it('HttpException thrown in method middleware returns correct status', async () => {
+      const forbidMw = async (_c: Context, _next: Next) => {
+        throw HttpException.forbidden('Access denied');
+      };
+
+      @Controller('/mw-method-ex')
+      class MwMethodExController {
+        @Get() @Public() @Middleware(forbidMw)
+        handle() { return { ok: true }; }
+      }
+
+      HonoRouteBuilder.configure({});
+      const app = HonoRouteBuilder.build(MwMethodExController);
+      const res = await app.fetch(makeRequest('/mw-method-ex'));
+      expect(res.status).toBe(403);
+      const body = await res.json() as { error: { code: string; }; };
+      expect(body.error.code).toBe('FORBIDDEN');
+    });
+
+    it('generic Error thrown in middleware routes to onError hook', async () => {
+      let captured: unknown;
+      const failMw = async (_c: Context, _next: Next) => { throw new Error('middleware exploded'); };
+
+      @Controller('/mw-generic-ex')
+      @Middleware(failMw)
+      class MwGenericExController {
+        @Get() @Public()
+        handle() { return { ok: true }; }
+      }
+
+      HonoRouteBuilder.configure({
+        onError: (err, c) => { captured = err; return c.json({ error: 'caught' }, 500); },
+      });
+      const app = HonoRouteBuilder.build(MwGenericExController);
+      const res = await app.fetch(makeRequest('/mw-generic-ex'));
+      expect(res.status).toBe(500);
+      expect((captured as Error).message).toBe('middleware exploded');
+    });
+
+    it('exposeStack is respected for HttpException thrown in middleware', async () => {
+      const mw = async (_c: Context, _next: Next) => { throw HttpException.internal('oops'); };
+
+      @Controller('/mw-stack-ex')
+      @Middleware(mw)
+      class MwStackExController {
+        @Get() @Public()
+        handle() { return { ok: true }; }
+      }
+
+      HonoRouteBuilder.configure({ exposeStack: true });
+      const app = HonoRouteBuilder.build(MwStackExController);
+      const res = await app.fetch(makeRequest('/mw-stack-ex'));
+      const body = await res.json() as { error: Record<string, unknown>; };
+      expect(typeof body.error['stack']).toBe('string');
+    });
+  });
+
+  /* -------- observability: trace ID + requestLogger + onRequestStart -------- */
+
+  describe('observability', () => {
+    @Controller('/obs')
+    class ObsController {
+      @Get('/ping') @Public()
+      ping() { return { traceId: getTraceId() }; }
+    }
+
+    it('generates X-Request-ID response header', async () => {
+      const app = HonoRouteBuilder.build(ObsController);
+      const res = await app.fetch(makeRequest('/obs/ping'));
+      expect(res.headers.get('x-request-id')).toBeTruthy();
+    });
+
+    it('echoes incoming X-Request-ID header', async () => {
+      const app = HonoRouteBuilder.build(ObsController);
+      const res = await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'test-trace-123' } }));
+      expect(res.headers.get('x-request-id')).toBe('test-trace-123');
+    });
+
+    it('getTraceId() returns the current trace ID inside handler', async () => {
+      const app = HonoRouteBuilder.build(ObsController);
+      const res = await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'my-trace' } }));
+      const body = await res.json() as { traceId?: string; };
+      expect(body.traceId).toBe('my-trace');
+    });
+
+    it('requestLogger receives traceId in entry', async () => {
+      const entries: Array<{ traceId?: string; }> = [];
+      HonoRouteBuilder.configure({ requestLogger: (e) => { entries.push(e); } });
+      const app = HonoRouteBuilder.build(ObsController);
+      await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'log-trace' } }));
+      expect(entries[0]?.traceId).toBe('log-trace');
+    });
+
+    it('onRequestStart is called before handler with traceId', async () => {
+      const starts: Array<{ method: string; traceId: string; }> = [];
+      HonoRouteBuilder.configure({ onRequestStart: (info) => { starts.push(info); } });
+      const app = HonoRouteBuilder.build(ObsController);
+      await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'start-trace' } }));
+      expect(starts[0]?.traceId).toBe('start-trace');
+      expect(starts[0]?.method).toBe('GET');
+    });
+  });
+
+  /* -------- HttpException -------- */
+
+  describe('HttpException', () => {
+    @Controller('/ex')
+    class ExController {
+      @Get('/not-found') @Public()
+      notFound() { throw HttpException.notFound('Item not found', { meta: { id: 99 } }); }
+
+      @Get('/bad') @Public()
+      bad() { throw HttpException.badRequest('Invalid input', { code: 'CUSTOM_CODE' }); }
+
+      @Get('/raw') @Public()
+      raw() { throw new HttpException(418, "I'm a teapot"); }
+
+      @Get('/override') @Public()
+      override() { throw HttpException.internal('Boom'); }
+
+      @Get('/unknown') @Public()
+      unknown() { throw new Error('Unexpected'); }
+
+      @Get('/stack') @Public()
+      stack() { throw HttpException.internal('oops'); }
+    }
+
+    it('returns correct status code for HttpException', async () => {
+      HonoRouteBuilder.configure({});
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/not-found'));
+      expect(res.status).toBe(404);
+    });
+
+    it('returns structured JSON body with code and message', async () => {
+      HonoRouteBuilder.configure({});
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/not-found'));
+      const body = await res.json() as { status: string; error: { code: string; message: string; meta: { id: number; }; }; };
+      expect(body.status).toBe('error');
+      expect(body.error.code).toBe('NOT_FOUND');
+      expect(body.error.message).toBe('Item not found');
+      expect(body.error.meta).toEqual({ id: 99 });
+    });
+
+    it('uses custom error code when provided', async () => {
+      HonoRouteBuilder.configure({});
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/bad'));
+      const body = await res.json() as { error: { code: string; }; };
+      expect(body.error.code).toBe('CUSTOM_CODE');
+    });
+
+    it('derives default code from status when no code provided', async () => {
+      HonoRouteBuilder.configure({});
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/raw'));
+      const body = await res.json() as { error: { code: string; }; };
+      expect(res.status).toBe(418);
+      expect(body.error.code).toBe('HTTP_ERROR');
+    });
+
+    it('onError receives HttpException and can persist it without overriding response', async () => {
+      const captured: unknown[] = [];
+      HonoRouteBuilder.configure({
+        onError: (err) => { captured.push(err); /* return nothing → use default response */ },
+      });
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/not-found'));
+      expect(res.status).toBe(404);
+      expect(captured[0]).toBeInstanceOf(HttpException);
+      expect((captured[0] as HttpException).code).toBe('NOT_FOUND');
+    });
+
+    it('onError returning a Response fully overrides HttpException response', async () => {
+      HonoRouteBuilder.configure({
+        onError: (_err, c) => c.json({ overridden: true }, 200),
+      });
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/override'));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { overridden: boolean; };
+      expect(body.overridden).toBe(true);
+    });
+
+    it('non-HttpException errors are re-thrown when onError returns void', async () => {
+      HonoRouteBuilder.configure({ onError: () => { /* void */ } });
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/unknown'));
+      expect(res.status).toBe(500);
+    });
+
+    it('does not include stack by default (exposeStack: false)', async () => {
+      HonoRouteBuilder.configure({ exposeStack: false });
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/stack'));
+      const body = await res.json() as { error: Record<string, unknown>; };
+      expect(body.error['stack']).toBeUndefined();
+    });
+
+    it('includes stack when exposeStack: true', async () => {
+      HonoRouteBuilder.configure({ exposeStack: true });
+      const app = HonoRouteBuilder.build(ExController);
+      const res = await app.fetch(makeRequest('/ex/stack'));
+      const body = await res.json() as { error: Record<string, unknown>; };
+      expect(typeof body.error['stack']).toBe('string');
+    });
+
+    it('static factories produce correct status codes', () => {
+      expect(HttpException.badRequest('x').status).toBe(400);
+      expect(HttpException.unauthorized().status).toBe(401);
+      expect(HttpException.forbidden().status).toBe(403);
+      expect(HttpException.notFound().status).toBe(404);
+      expect(HttpException.conflict('x').status).toBe(409);
+      expect(HttpException.unprocessable('x').status).toBe(422);
+      expect(HttpException.tooManyRequests().status).toBe(429);
+      expect(HttpException.internal().status).toBe(500);
+      expect(HttpException.serviceUnavailable().status).toBe(503);
     });
   });
 });

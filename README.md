@@ -2,6 +2,8 @@
 
 NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dependency injection, guards, SSE, WebSocket, channels, OpenAPI, and more.
 
+**[📖 Documentation](https://frontend-hono-template-decorator.vercel.app/)** · **[npm](https://www.npmjs.com/package/hono-forge)** · **[GitHub](https://github.com/Mad1Duck/hono-decorator)** · **[Changelog](./CHANGELOG.md)**
+
 ## Features
 
 - **Controller routing** — `@Controller`, `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Head`, `@Options`, `@All`
@@ -230,6 +232,75 @@ container.registerInstance(MAILER, new Resend(process.env.RESEND_KEY));
 ```
 
 > **`registerInstance` vs `registerSingleton`**: both do the same thing. `registerInstance` is the recommended name when registering a pre-built external object. `registerSingleton` is kept for backwards compatibility.
+
+### `@RequestScoped()`
+
+A fresh instance is created per request and destroyed automatically when the request ends. The same instance is shared if resolved multiple times within the same request.
+
+```ts
+import { Injectable, RequestScoped } from 'hono-forge';
+import type { OnDestroy } from 'hono-forge';
+
+@Injectable()
+@RequestScoped()
+class RequestContext implements OnDestroy {
+  readonly requestId = crypto.randomUUID();
+
+  onDestroy() {
+    console.log('request done', this.requestId);
+  }
+}
+```
+
+> Unlike `@Singleton`, a `@RequestScoped` class cannot be resolved outside a route handler (throws `DependencyResolutionError`).
+
+### `@Stateless()`
+
+No-op marker for `@Singleton()` classes that hold no mutable per-request state. Documents intent and can be enforced by future tooling.
+
+```ts
+@Injectable()
+@Singleton()
+@Stateless()
+class UserRepo {
+  findById(id: string) { return db.query(...); }
+}
+```
+
+### Lifecycle hooks — `OnInit` / `OnDestroy`
+
+```ts
+import type { OnInit, OnDestroy } from 'hono-forge';
+
+@Injectable()
+@Singleton()
+class RedisClient implements OnInit, OnDestroy {
+  private client!: Redis;
+
+  async onInit() {
+    this.client = new Redis(process.env.REDIS_URL!);
+    await this.client.ping();
+  }
+
+  async onDestroy() {
+    await this.client.quit();
+  }
+}
+```
+
+### `container.boot()` / `container.shutdown()`
+
+```ts
+// At startup — calls onInit() on all registered singletons that implement OnInit
+await container.boot();
+app.listen(3000);
+
+// On shutdown — calls onDestroy() in reverse registration order
+process.on('SIGTERM', async () => {
+  await container.shutdown();
+  process.exit(0);
+});
+```
 
 ### Table column schemas with `defineSchemas`
 
@@ -807,21 +878,117 @@ Device types: `'mobile' | 'tablet' | 'desktop' | 'bot'`.
 
 ## Error handling
 
+### `HttpException`
+
+Throw `HttpException` from anywhere in a handler or service — the route builder catches it and returns a structured JSON response at the correct HTTP status code.
+
+```ts
+import { HttpException } from 'hono-forge';
+
+@Get('/:id')
+async getOne(@Param('id') id: string) {
+  const user = await this.repo.findById(id);
+  if (!user) throw HttpException.notFound('User not found');
+  return user;
+}
+```
+
+Static factories:
+
+| Factory | Status |
+|---------|--------|
+| `HttpException.badRequest(msg?, meta?)` | 400 |
+| `HttpException.unauthorized(msg?, meta?)` | 401 |
+| `HttpException.forbidden(msg?, meta?)` | 403 |
+| `HttpException.notFound(msg?, meta?)` | 404 |
+| `HttpException.conflict(msg?, meta?)` | 409 |
+| `HttpException.unprocessable(msg?, meta?)` | 422 |
+| `HttpException.tooManyRequests(msg?, meta?)` | 429 |
+| `HttpException.internal(msg?, meta?)` | 500 |
+| `HttpException.serviceUnavailable(msg?, meta?)` | 503 |
+
+All errors serialize to:
+```json
+{ "status": "error", "error": { "code": "NOT_FOUND", "message": "User not found" } }
+```
+
+### `exposeStack`
+
+Controls whether `HttpException` stack traces appear in error responses:
+
 ```ts
 HonoRouteBuilder.configure({
-  onError: (err, c) => {
-    console.error(err);
-    // optionally: Sentry.captureException(err);
-    return c.json(
-      { error: { code: 'INTERNAL_SERVER_ERROR', message: 'Something went wrong' } },
-      500
-    );
+  exposeStack: 'development', // only when NODE_ENV !== 'production'
+  // exposeStack: true        // always
+  // exposeStack: false       // never (default)
+});
+```
+
+### `onError` hook
+
+```ts
+HonoRouteBuilder.configure({
+  onError: async (err, c) => {
+    // Called for every non-validation error (including HttpException).
+    // Return a Response to override; return void to fall through to default handling.
+    if (err instanceof HttpException) {
+      await db.insert(errorLogs).values({ code: err.code, message: err.message });
+      // return nothing → default structured JSON is still sent
+    } else {
+      return c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500);
+    }
   },
 });
 ```
 
-- Validation errors (`ZodError`) always return `400` regardless of `onError`.
-- If `onError` is not configured, unhandled errors re-throw to Hono's default 500 handler.
+- `HttpException` → auto-formatted as structured JSON at the correct status code
+- Other errors → re-thrown to Hono's default 500 handler
+- Validation errors (`ZodError`) always return `400` and bypass `onError`
+
+---
+
+## Observability
+
+### Trace ID / Correlation ID
+
+Every request automatically gets a `traceId` from the `X-Request-ID` header (or a generated UUID if absent). The ID is echoed back as `X-Request-ID` on the response.
+
+```ts
+import { getTraceId } from 'hono-forge';
+
+@Injectable()
+class AuditService {
+  log(action: string) {
+    console.log({ traceId: getTraceId(), action }); // works without passing traceId explicitly
+  }
+}
+```
+
+### `onRequestStart` hook
+
+Called before middleware and guards on every request. Use it to start an OpenTelemetry span or attach a correlation ID to your logger:
+
+```ts
+HonoRouteBuilder.configure({
+  onRequestStart: ({ method, path, traceId, ip, userAgent }) => {
+    const span = tracer.startSpan(`${method} ${path}`, { attributes: { traceId } });
+    // ...
+  },
+});
+```
+
+### `runWithTraceId`
+
+For running code outside the route builder within a trace context:
+
+```ts
+import { runWithTraceId } from 'hono-forge';
+
+await runWithTraceId('my-trace-id', async () => {
+  // getTraceId() returns 'my-trace-id' here
+  await myService.doWork();
+});
+```
 
 ---
 
@@ -871,9 +1038,19 @@ async sendWebhook() { /* ... */ }
 Caches the return value in memory keyed by serialized arguments. Optional `ttl` (ms) before the cache expires.
 
 ```ts
+// Global cache — shared across all requests (default). Good for config, feature flags.
 @Memoize({ ttl: 30_000 })
 async getConfig() { return fetchRemoteConfig(); }
+
+// Per-request cache — isolated per request. Use on singletons returning user-specific data.
+@Memoize({ scope: 'request' })
+async getCurrentUserPermissions() { return this.permRepo.findForUser(this.userId); }
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ttl` | `undefined` (indefinite) | Cache expiry in milliseconds |
+| `scope` | `'global'` | `'global'` — shared cache; `'request'` — isolated per request |
 
 ### `@ValidateResult`
 

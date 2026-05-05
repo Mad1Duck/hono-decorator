@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import type { ZodTypeAny } from 'zod';
 import { txStorage } from '../utils/transaction';
+import { getRequestContext, createRequestContext, runInRequestContext, type CacheEntry } from '../core/request-context';
 
 /* ================= TYPES ================= */
 
@@ -8,10 +9,17 @@ type AnyMethod = (...args: unknown[]) => unknown;
 
 type ClassCtor = new (...args: unknown[]) => unknown;
 
-type CacheEntry = {
-  value: unknown;
-  expires: number;
-};
+/* ================= MEMOIZE REQUEST SCOPE ================= */
+
+/**
+ * Wraps `fn` in a fresh per-request memoize scope.
+ * Called automatically by HonoRouteBuilder for every HTTP handler.
+ * Only needed manually when running handlers outside the route builder.
+ */
+export function runWithMemoScope<T>(fn: () => T): T {
+  if (getRequestContext()) return fn();
+  return runInRequestContext(createRequestContext(''), fn);
+}
 
 type LoggerLike = {
   info?: (data: unknown, message?: string) => void;
@@ -39,7 +47,7 @@ export type TransactionExecutor<TDb = unknown> = (
 /* ================= THROTTLE ================= */
 
 export function Throttle(ms: number): MethodDecorator {
-  let lastCall = 0;
+  const lastCallMap = new WeakMap<object, number>();
 
   return <T>(
     target: object,
@@ -50,16 +58,17 @@ export function Throttle(ms: number): MethodDecorator {
     if (!original) return descriptor;
 
     descriptor.value = (async function (
-      this: unknown,
+      this: object,
       ...args: unknown[]
     ) {
       const now = Date.now();
+      const lastCall = lastCallMap.get(this) ?? 0;
 
       if (now - lastCall < ms) {
         throw new Error(`Throttled: wait ${ms - (now - lastCall)}ms`);
       }
 
-      lastCall = now;
+      lastCallMap.set(this, now);
       return await original.apply(this, args);
     }) as T;
 
@@ -69,10 +78,28 @@ export function Throttle(ms: number): MethodDecorator {
 
 /* ================= MEMOIZE ================= */
 
+/**
+ * Caches the method's return value.
+ *
+ * @param options.ttl       - Cache TTL in milliseconds. Omit for indefinite caching.
+ * @param options.scope     - `'global'` — one cache shared across all requests (default).
+ *                            `'request'` — fresh cache per request; safe for user-specific data.
+ *                            Use `'request'` on singletons that return per-user results.
+ *
+ * @example Global cache (DB config, feature flags)
+ * @Memoize({ ttl: 60_000 })
+ * async getConfig() { ... }
+ *
+ * @example Request-scoped cache (user-specific data on a singleton service)
+ * @Memoize({ scope: 'request' })
+ * async getUser(id: string) { ... }
+ */
 export function Memoize(
-  options: { ttl?: number; } = {}
+  options: { ttl?: number; scope?: 'global' | 'request'; } = {}
 ): MethodDecorator {
-  const cache = new Map<string, CacheEntry>();
+  const globalCache = new Map<string, CacheEntry>();
+  // unique key so different @Memoize applications don't share the per-request bucket
+  const methodId = `memo_${Math.random().toString(36).slice(2)}`;
 
   return <T>(
     target: object,
@@ -87,19 +114,35 @@ export function Memoize(
       ...args: unknown[]
     ) {
       const key = JSON.stringify(args);
-      const cached = cache.get(key);
+      const scope = options.scope ?? 'global';
 
+      let cache: Map<string, CacheEntry>;
+
+      if (scope === 'request') {
+        const ctx = getRequestContext();
+        if (ctx) {
+          if (!ctx.memoCache.has(methodId)) {
+            ctx.memoCache.set(methodId, new Map());
+          }
+          cache = ctx.memoCache.get(methodId)!;
+        } else {
+          // Outside request context — fall back to global silently
+          cache = globalCache;
+        }
+      } else {
+        cache = globalCache;
+      }
+
+      const cached = cache.get(key);
       if (cached && (!options.ttl || Date.now() < cached.expires)) {
         return cached.value;
       }
 
       const result = await original.apply(this, args);
-
       cache.set(key, {
         value: result,
         expires: options.ttl ? Date.now() + options.ttl : Infinity,
       });
-
       return result;
     }) as T;
 
@@ -209,7 +252,7 @@ export function Transaction(
     const exec = executor ?? defaultExecutor;
 
     descriptor.value = (async function (
-      this: { db?: unknown },
+      this: { db?: unknown; },
       ...args: unknown[]
     ) {
       if (!this.db) {

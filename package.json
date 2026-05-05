@@ -1,6 +1,6 @@
 {
   "name": "hono-forge",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "NestJS-style decorators for Hono — DI container, routing, guards, SSE, WebSocket, channels, OpenAPI, and more.",
   "type": "module",
   "main": "./dist/index.js",
@@ -48,7 +48,7 @@
   },
   "peerDependencies": {
     "hono": ">=4",
-    "zod": ">=3"
+    "zod": ">=4"
   },
   "devDependencies": {
     "@swc/core": "^1.15.33",

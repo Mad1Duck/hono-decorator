@@ -13,6 +13,8 @@ export interface RequestLogEntry {
   statusCode: number;
   durationMs: number;
   userId?: string;
+  /** Trace / correlation ID. Value of incoming X-Request-ID header or a generated UUID. */
+  traceId?: string;
 }
 
 export type RequestLogger = (entry: RequestLogEntry) => void | Promise<void>;

@@ -73,3 +73,40 @@ export type InjectionToken<T = unknown> =
   | ConcreteConstructor<T>
   | string
   | symbol;
+
+/**
+ * Lifecycle hook — called once after a singleton is first resolved via `container.boot()`.
+ * Use for async initialization: connecting to a database, loading config, etc.
+ *
+ * @example
+ * ```ts
+ * @Injectable()
+ * @Singleton()
+ * class RedisClient implements OnInit {
+ *   async onInit() { await this.connect(); }
+ * }
+ * await container.boot(); // calls onInit on all registered singletons
+ * ```
+ */
+export interface OnInit {
+  onInit(): Promise<void> | void;
+}
+
+/**
+ * Lifecycle hook — called on cleanup.
+ * - Singletons: called by `container.shutdown()`
+ * - Request-scoped: called automatically at the end of each request
+ *
+ * @example
+ * ```ts
+ * @Injectable()
+ * @Singleton()
+ * class RedisClient implements OnDestroy {
+ *   async onDestroy() { await this.client.quit(); }
+ * }
+ * await container.shutdown(); // calls onDestroy on all singletons (reverse order)
+ * ```
+ */
+export interface OnDestroy {
+  onDestroy(): Promise<void> | void;
+}

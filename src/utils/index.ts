@@ -16,3 +16,4 @@ export type { TableSchemas, DefineSchemasOptions } from './schema';
 export { useTransaction } from './transaction';
 export { paginate, paginatedSchema, PaginationQuerySchema } from './pagination';
 export type { PaginatedResult, PaginationMeta, PaginationQuery } from './pagination';
+export { getTraceId, runWithTraceId } from './trace';

@@ -4,6 +4,8 @@ import { streamSSE } from 'hono/streaming';
 import { ZodError } from 'zod';
 
 import { container } from './container';
+import { HttpException } from './http-exception';
+import { createRequestContext, runInRequestContext } from './request-context';
 import { METADATA_KEYS } from '../decorators/metadata';
 import {
   extractIp,
@@ -23,18 +25,48 @@ import type { AbstractConstructor, ConcreteConstructor, ControllerConstructor, C
 /* ================= TYPES ================= */
 
 /**
- * Global error handler for unhandled route errors.
- * Return a Response to send to the client; re-throw to let Hono handle it.
+ * Global error handler called for every non-Zod error (including `HttpException`).
  *
- * @example
+ * - Return a `Response` to fully override the error response sent to the client.
+ * - Return `void` / `undefined` to fall through to default handling:
+ *   - `HttpException` → structured JSON at the correct status code
+ *   - Other errors → re-thrown to Hono's default 500 handler
+ *
+ * This is the right place to persist errors to a database or external service.
+ *
+ * @example Save HttpException to DB, use default response
  * HonoRouteBuilder.configure({
- *   onError: (err, c) => {
- *     console.error(err);
- *     return c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500);
+ *   onError: async (err, c) => {
+ *     if (err instanceof HttpException) {
+ *       await db.insert(errorLogs).values({ code: err.code, message: err.message, meta: err.meta });
+ *       // return nothing → default JSON response is still sent
+ *     }
  *   },
  * });
+ *
+ * @example Full override for all errors
+ * HonoRouteBuilder.configure({
+ *   onError: (err, c) => c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500),
+ * });
  */
-export type ErrorHandler = (error: unknown, c: Context) => Response | Promise<Response>;
+export type ErrorHandler = (
+  error: unknown,
+  c: Context
+) => Response | void | Promise<Response | void>;
+
+/**
+ * Payload passed to `onRequestStart`. Use this to start an OTel span,
+ * attach a logger context, or initialise any per-request observability state.
+ */
+export interface RequestStartInfo {
+  method: string;
+  path: string;
+  traceId: string;
+  ip: string;
+  userAgent: string;
+}
+
+export type RequestStartHook = (info: RequestStartInfo) => void | Promise<void>;
 
 type WebSocketFactory = (c: Context) => unknown | Promise<unknown>;
 
@@ -123,6 +155,48 @@ export interface RouteBuilderConfig {
    * });
    */
   onError?: ErrorHandler;
+
+  /**
+   * Hook called at the start of every request, before middleware and guards run.
+   * Receives method, path, traceId, IP, and user-agent.
+   *
+   * Use this to start an OpenTelemetry span, attach a correlation ID to your logger,
+   * or initialise any per-request observability context.
+   *
+   * @example OpenTelemetry
+   * HonoRouteBuilder.configure({
+   *   onRequestStart: ({ traceId, method, path }) => {
+   *     const span = tracer.startSpan(`${method} ${path}`, { attributes: { traceId } });
+   *     context.with(trace.setSpan(context.active(), span), () => {});
+   *   },
+   * });
+   */
+  onRequestStart?: RequestStartHook;
+
+  /**
+   * Enforce that mutation routes (POST, PUT, PATCH) always use a validated body schema.
+   *
+   * - `'warn'` (default) — logs a `console.warn` at `build()` time when a mutation route
+   *   uses `@Body()` without a Zod schema.
+   * - `'error'` — throws at `build()` time instead of warning. Recommended for production builds.
+   * - `'off'` — disables the check entirely.
+   *
+   * @example
+   * HonoRouteBuilder.configure({ strictValidation: 'error' });
+   */
+  strictValidation?: 'warn' | 'error' | 'off';
+
+  /**
+   * Controls whether the `stack` trace is included in `HttpException` error responses.
+   *
+   * - `false` (default) — stack is never exposed (safe for production)
+   * - `true` — stack is always included in the response
+   * - `'development'` — stack is included only when `NODE_ENV` is not `'production'`
+   *
+   * @example
+   * HonoRouteBuilder.configure({ exposeStack: 'development' });
+   */
+  exposeStack?: boolean | 'development';
 }
 
 export type { RequestLogger, RequestLogEntry };
@@ -143,7 +217,7 @@ export class HonoRouteBuilder {
   static build<T>(
     ControllerClass: ControllerConstructor<T>,
     platform?: 'mobile' | 'web',
-    options?: { excludePrivate?: boolean }
+    options?: { excludePrivate?: boolean; }
   ): Hono {
     const app = new Hono();
 
@@ -167,7 +241,7 @@ export class HonoRouteBuilder {
       ControllerClass as ConcreteConstructor<T>
     ) as T & ControllerInstance;
 
-    const proto = (ControllerClass as unknown as { prototype: object }).prototype;
+    const proto = (ControllerClass as unknown as { prototype: object; }).prototype;
 
     /* ----- Filter Routes by Platform & Visibility ----- */
     const platformRoutes = routes.filter((route) => {
@@ -199,6 +273,50 @@ export class HonoRouteBuilder {
   ): void {
     const { method, path, handlerName } = route;
     const proto = Object.getPrototypeOf(controllerInstance);
+
+    /* ----- Error config (shared by wrapMiddleware + handlers) ----- */
+    const onError = this.config.onError;
+    const exposeStack = this.config.exposeStack ?? false;
+    const shouldExposeStack =
+      exposeStack === true ||
+      (exposeStack === 'development' && process.env['NODE_ENV'] !== 'production');
+
+    /**
+     * Wraps a user-supplied middleware so that any thrown error
+     * (HttpException, ZodError, or generic) is formatted with the same
+     * structured JSON shape used by the HTTP handler, and routed through
+     * the configured `onError` hook before being serialised.
+     */
+    const wrapMiddleware = (mw: HonoMiddlewareFn): HonoMiddlewareFn =>
+      async (c, next) => {
+        try {
+          return await mw(c, next);
+        } catch (error: unknown) {
+          if (error instanceof ZodError) {
+            return c.json(
+              { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: error.issues } },
+              400
+            );
+          }
+          if (onError) {
+            const override = await onError(error, c);
+            if (override) return override;
+          }
+          if (error instanceof HttpException) {
+            const body: Record<string, unknown> = {
+              status: 'error',
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(error.meta !== undefined ? { meta: error.meta } : {}),
+                ...(shouldExposeStack && error.stack ? { stack: error.stack } : {}),
+              },
+            };
+            return c.json(body, error.status as Parameters<typeof c.json>[1]);
+          }
+          throw error;
+        }
+      };
 
     /* ----- Check if route is public ----- */
     const isPublic = Reflect.getMetadata(
@@ -244,13 +362,31 @@ export class HonoRouteBuilder {
       handlerName
     ) as GuardMetadata[] | undefined) ?? [];
 
+    const routeLabel = `${method.toUpperCase()} ${basePath}${path}`;
+
+    /* ----- Strict Validation Check ----- */
+    const strictMode = this.config.strictValidation ?? 'warn';
+    if (strictMode !== 'off' && ['post', 'put', 'patch'].includes(method)) {
+      const hasUnvalidatedBody = params.some(
+        (p) => p.type === 'body' && !p.schema
+      );
+      if (hasUnvalidatedBody) {
+        const msg =
+          `[hono-forge] ${routeLabel} uses @Body() without a Zod schema — ` +
+          `unvalidated input will reach the handler. Use @ValidatedBody(schema) to enforce validation.`;
+        if (strictMode === 'error') {
+          throw new Error(msg);
+        } else {
+          console.warn(msg);
+        }
+      }
+    }
+
     // 1. Class-level middlewares
-    middlewares.push(...classMiddlewares);
+    middlewares.push(...classMiddlewares.map(wrapMiddleware));
 
     // 2. Method-level middlewares
-    middlewares.push(...methodMiddlewares);
-
-    const routeLabel = `${method.toUpperCase()} ${basePath}${path}`;
+    middlewares.push(...methodMiddlewares.map(wrapMiddleware));
 
     // 3. Rate limiting middleware (if decorator is present)
     if (rateLimitMeta) {
@@ -269,7 +405,7 @@ export class HonoRouteBuilder {
         keyGenerator: rateLimitMeta.keyGenerator,
       });
 
-      middlewares.push(rateLimitMiddleware);
+      middlewares.push(wrapMiddleware(rateLimitMiddleware));
     }
 
     // 4. Guards middleware (auth, role, permission)
@@ -339,9 +475,12 @@ export class HonoRouteBuilder {
 
     // Hono's generic types can't infer spread middleware arrays via app[method](),
     // so we cast to a narrower interface that exposes exactly what we need.
-    type HonoWithOn = { on(method: string, path: string, ...handlers: HonoMiddlewareFn[]): Hono };
+    type HonoWithOn = { on(method: string, path: string, ...handlers: HonoMiddlewareFn[]): Hono; };
     const register = (m: string, ...handlers: HonoMiddlewareFn[]) =>
       (app as unknown as HonoWithOn).on(m.toUpperCase(), fullPath, ...handlers);
+
+    const requestLogger = this.config.requestLogger;
+    const onRequestStart = this.config.onRequestStart;
 
     /* ----- SSE Route ----- */
     const isSse = Reflect.getMetadata(
@@ -350,11 +489,21 @@ export class HonoRouteBuilder {
 
     if (isSse) {
       register('GET', ...middlewares, ((c: Context) => {
+        const startMs = Date.now();
+        const ua = extractUserAgent(c);
+        const traceId = c.req.header('x-request-id') ?? crypto.randomUUID();
+        c.header('x-request-id', traceId);
+
         return streamSSE(c, async (stream) => {
+          if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
           const args = await this.resolveParameters(params, c, stream);
           const fn = controllerInstance[handlerName];
           if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
           await fn.apply(controllerInstance, args);
+
+          if (requestLogger) {
+            await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
+          }
         });
       }) as unknown as HonoMiddlewareFn);
       return;
@@ -374,55 +523,91 @@ export class HonoRouteBuilder {
       }
       const upgrader = this.config.webSocketUpgrader;
       const wsHandler = upgrader(async (c: Context) => {
+        const startMs = Date.now();
+        const ua = extractUserAgent(c);
+        const traceId = c.req.header('x-request-id') ?? crypto.randomUUID();
+        c.header('x-request-id', traceId);
+
+        if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
         const args = await this.resolveParameters(params, c);
         const fn = controllerInstance[handlerName];
         if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
-        return fn.apply(controllerInstance, args);
+        const result = fn.apply(controllerInstance, args);
+
+        if (requestLogger) {
+          await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 101, durationMs: Date.now() - startMs, traceId });
+        }
+
+        return result;
       });
       register('GET', ...middlewares, wsHandler);
       return;
     }
 
     /* ----- Standard HTTP Route ----- */
-    const requestLogger = this.config.requestLogger;
-    const onError = this.config.onError;
     const httpHandler = async (c: Context) => {
       const startMs = Date.now();
-      let response: Response;
+      const ua = extractUserAgent(c);
+      const traceId = c.req.header('x-request-id') ?? crypto.randomUUID();
+      c.header('x-request-id', traceId);
 
-      try {
-        const args = await this.resolveParameters(params, c);
-        const fn = controllerInstance[handlerName];
+      if (onRequestStart) await onRequestStart({ method: c.req.method, path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
 
-        if (typeof fn !== 'function') {
-          throw new Error(`Handler ${handlerName} not found`);
-        }
+      const ctx = createRequestContext(traceId);
+      const response = await runInRequestContext(ctx, () =>
+        container.runInScope(async () => {
+          try {
+            const args = await this.resolveParameters(params, c);
+            const fn = controllerInstance[handlerName];
 
-        const result = await fn.apply(controllerInstance, args);
-        response = result !== undefined ? c.json(result) : c.body(null);
-      } catch (error: unknown) {
+            if (typeof fn !== 'function') {
+              throw new Error(`Handler ${handlerName} not found`);
+            }
 
-        if (error instanceof ZodError) {
-          response = c.json(
-            {
-              status: 'error',
-              error: {
-                code: 'VALIDATION_ERROR',
-                message: 'Validation failed',
-                details: error.issues,
-              },
-            },
-            400
-          );
-        } else if (onError) {
-          response = await onError(error, c);
-        } else {
-          throw error;
-        }
-      }
+            const result = await fn.apply(controllerInstance, args);
+            return result !== undefined ? c.json(result) : c.body(null);
+          } catch (error: unknown) {
+            if (error instanceof ZodError) {
+              return c.json(
+                {
+                  status: 'error',
+                  error: {
+                    code: 'VALIDATION_ERROR',
+                    message: 'Validation failed',
+                    details: error.issues,
+                  },
+                },
+                400
+              );
+            }
+
+            // Call onError for logging / DB persistence regardless of error type.
+            // If it returns a Response, use that as the final reply.
+            if (onError) {
+              const override = await onError(error, c);
+              if (override) return override;
+            }
+
+            // Auto-handle HttpException with structured JSON at the correct status code.
+            if (error instanceof HttpException) {
+              const body: Record<string, unknown> = {
+                status: 'error',
+                error: {
+                  code: error.code,
+                  message: error.message,
+                  ...(error.meta !== undefined ? { meta: error.meta } : {}),
+                  ...(shouldExposeStack && error.stack ? { stack: error.stack } : {}),
+                },
+              };
+              return c.json(body, error.status as Parameters<typeof c.json>[1]);
+            }
+
+            throw error;
+          }
+        })
+      );
 
       if (requestLogger) {
-        const ua = extractUserAgent(c);
         const entry: RequestLogEntry = {
           method: c.req.method,
           path: c.req.path,
@@ -431,7 +616,8 @@ export class HonoRouteBuilder {
           userAgent: ua,
           statusCode: response.status,
           durationMs: Date.now() - startMs,
-          userId: (c.get('user') as { id?: string } | undefined)?.id,
+          userId: (c.get('user') as { id?: string; } | undefined)?.id,
+          traceId,
         };
         await requestLogger(entry);
       }

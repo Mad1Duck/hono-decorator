@@ -42,6 +42,8 @@ import {
   ValidateResult,
   Audit,
   Transaction,
+  Stateless,
+  runWithMemoScope,
   defineSchemas,
   useTransaction,
   paginate,
@@ -64,13 +66,13 @@ import { z } from 'zod';
 /* ================= CONTROLLER ================= */
 
 @Controller('/users')
-class UserController {}
+class UserController { }
 
 @Controller()
-class RootController {}
+class RootController { }
 
 @Controller('/items', { platform: 'web', version: 'v2' })
-class ItemController {}
+class ItemController { }
 
 describe('@Controller', () => {
   it('sets basePath metadata', () => {
@@ -93,40 +95,40 @@ describe('@Controller', () => {
 
 class Routes {
   @Get('/list')
-  list() {}
+  list() { }
 
   @Post('/create')
-  create() {}
+  create() { }
 
   @Put('/:id')
-  update() {}
+  update() { }
 
   @Patch('/:id/partial')
-  patch() {}
+  patch() { }
 
   @Delete('/:id')
-  remove() {}
+  remove() { }
 }
 
 class ExtendedRoutes {
   @Head('/ping')
-  ping() {}
+  ping() { }
 
   @Options('/cors')
-  cors() {}
+  cors() { }
 
   @All('/any')
-  any() {}
+  any() { }
 }
 
 class SseRoutes {
   @Sse('/events')
-  events(@SseStream() _stream: unknown) {}
+  events(@SseStream() _stream: unknown) { }
 }
 
 class WsRoutes {
   @WebSocket('/chat')
-  chat() {}
+  chat() { }
 }
 
 describe('HTTP method decorators', () => {
@@ -203,7 +205,7 @@ describe('@Sse', () => {
       METADATA_KEYS.PARAMS,
       new SseRoutes(),
       'events'
-    ) as Array<{ type: string; index: number }>;
+    ) as Array<{ type: string; index: number; }>;
     const p = params.find(p => p.type === 'sse');
     expect(p?.index).toBe(0);
   });
@@ -234,7 +236,7 @@ class ParamCtrl {
     @Param('id') _id: unknown,
     @Headers('x-token') _token: unknown,
     @User() _user: unknown,
-  ) {}
+  ) { }
 }
 
 describe('Parameter decorators', () => {
@@ -274,22 +276,22 @@ describe('Parameter decorators', () => {
 
 class SecureRoutes {
   @RequireAuth()
-  authOnly() {}
+  authOnly() { }
 
   @RequireRole('admin', 'mod')
-  roleRoute() {}
+  roleRoute() { }
 
   @RequireAllRoles('admin', 'superuser')
-  allRolesRoute() {}
+  allRolesRoute() { }
 
   @RequirePermission('users:read', 'users:write')
-  permRoute() {}
+  permRoute() { }
 
   @RequireAnyPermission('reports:read', 'admin:all')
-  anyPermRoute() {}
+  anyPermRoute() { }
 
   @Public()
-  publicRoute() {}
+  publicRoute() { }
 }
 
 const secureProto = SecureRoutes.prototype;
@@ -340,11 +342,11 @@ describe('Guard decorators', () => {
 @Controller('/priv-test')
 class PrivateRoutes {
   @Get('/open')
-  open() {}
+  open() { }
 
   @Get('/hidden')
   @Private()
-  hidden() {}
+  hidden() { }
 }
 
 describe('@Private', () => {
@@ -359,11 +361,26 @@ describe('@Private', () => {
   });
 });
 
+/* ================= STATELESS ================= */
+
+describe('@Stateless', () => {
+  it('sets stateless metadata on the class', () => {
+    @Stateless()
+    class StatelessRepo { }
+    expect(Reflect.getMetadata('stateless', StatelessRepo)).toBe(true);
+  });
+
+  it('does not set stateless on non-annotated class', () => {
+    class StatefulSvc { }
+    expect(Reflect.getMetadata('stateless', StatefulSvc)).toBeUndefined();
+  });
+});
+
 /* ================= RATE LIMIT ================= */
 
 class RateLimitedRoutes {
   @RateLimit({ max: 10, windowMs: 60_000, message: 'Slow down' })
-  limited() {}
+  limited() { }
 }
 
 describe('@RateLimit', () => {
@@ -387,11 +404,11 @@ const fn2: HonoMiddlewareFn = async (_c: Context, next: Next) => next();
 
 class MwRoutes {
   @Middleware(fn1, fn2)
-  handler() {}
+  handler() { }
 }
 
 @Middleware(fn1)
-class MwClass {}
+class MwClass { }
 
 describe('@Middleware', () => {
   it('stores middleware array on the method', () => {
@@ -417,7 +434,7 @@ describe('@Middleware', () => {
 
 class CachedRoutes {
   @Cache({ ttl: 5000, key: 'my-key' })
-  fetch() {}
+  fetch() { }
 }
 
 describe('@Cache', () => {
@@ -439,7 +456,7 @@ class ReqResCtrl {
   handler(
     @Req() _req: unknown,
     @Res() _res: unknown,
-  ) {}
+  ) { }
 }
 
 describe('@Req / @Res', () => {
@@ -514,10 +531,10 @@ describe('@Transform', () => {
 
   it('can transform to a different shape', async () => {
     class Svc {
-      @Transform((u: { id: number; name: string }) => ({ id: u.id }))
+      @Transform((u: { id: number; name: string; }) => ({ id: u.id }))
       async getUser() { return { id: 1, name: 'Alice' }; }
     }
-    await expect(new Svc().getUser()).resolves.toEqual({ id: 1 } as { id: number; name: string });
+    await expect(new Svc().getUser()).resolves.toEqual({ id: 1 } as { id: number; name: string; });
   });
 });
 
@@ -544,25 +561,25 @@ describe('@TrackMetrics', () => {
 describe('@ValidatedBody / @ValidatedQuery / @ValidatedParam', () => {
   it('ValidatedBody sets PARAMS metadata with type=body', () => {
     class Ctrl {
-      handler(@ValidatedBody(z.object({ name: z.string() })) _body: unknown) {}
+      handler(@ValidatedBody(z.object({ name: z.string() })) _body: unknown) { }
     }
-    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string }[] | undefined;
+    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string; }[] | undefined;
     expect(params?.[0]?.type).toBe('body');
   });
 
   it('ValidatedQuery sets PARAMS metadata with type=query', () => {
     class Ctrl {
-      handler(@ValidatedQuery(z.object({ q: z.string() })) _query: unknown) {}
+      handler(@ValidatedQuery(z.object({ q: z.string() })) _query: unknown) { }
     }
-    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string }[] | undefined;
+    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string; }[] | undefined;
     expect(params?.[0]?.type).toBe('query');
   });
 
   it('ValidatedParam sets PARAMS metadata with type=param and name', () => {
     class Ctrl {
-      handler(@ValidatedParam('id', z.string().uuid()) _id: unknown) {}
+      handler(@ValidatedParam('id', z.string().uuid()) _id: unknown) { }
     }
-    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string; name: string }[] | undefined;
+    const params = Reflect.getMetadata(METADATA_KEYS.PARAMS, new Ctrl(), 'handler') as { type: string; name: string; }[] | undefined;
     expect(params?.[0]?.type).toBe('param');
     expect(params?.[0]?.name).toBe('id');
   });
@@ -580,6 +597,28 @@ describe('@Throttle', () => {
   });
 
   it('throws on a second call within the throttle window', async () => {
+    class Svc {
+      @Throttle(5000)
+      async ping() { return 'pong'; }
+    }
+    const svc = new Svc();
+    await svc.ping();
+    await expect(svc.ping()).rejects.toThrow('Throttled');
+  });
+
+  it('two separate instances have independent throttle windows', async () => {
+    class Svc {
+      @Throttle(5000)
+      async ping() { return 'pong'; }
+    }
+    const a = new Svc();
+    const b = new Svc();
+    await a.ping(); // throttles `a` for 5 s
+    // `b` is a different object — WeakMap gives it a fresh lastCall
+    await expect(b.ping()).resolves.toBe('pong');
+  });
+
+  it('same instance is still throttled for subsequent calls', async () => {
     class Svc {
       @Throttle(5000)
       async ping() { return 'pong'; }
@@ -629,6 +668,57 @@ describe('@Memoize', () => {
     await svc.fetch();
     expect(calls).toBe(2);
   });
+
+  it('scope: "global" shares cache across calls (default)', async () => {
+    let calls = 0;
+    class Svc {
+      @Memoize({ scope: 'global' })
+      async fetch(id: number) { calls++; return id; }
+    }
+    const svc = new Svc();
+    await svc.fetch(1);
+    await svc.fetch(1); // hits global cache
+    expect(calls).toBe(1);
+  });
+
+  it('scope: "request" isolates cache per runWithMemoScope call', async () => {
+    let calls = 0;
+    class Svc {
+      @Memoize({ scope: 'request' })
+      async fetch(id: number) { calls++; return id; }
+    }
+    const svc = new Svc();
+
+    // First "request"
+    await runWithMemoScope(async () => {
+      await svc.fetch(1);
+      await svc.fetch(1); // hits request cache
+    });
+
+    // Second "request" — fresh cache, must re-execute
+    await runWithMemoScope(async () => {
+      await svc.fetch(1);
+    });
+
+    expect(calls).toBe(2); // once per request, not once total
+  });
+
+  it('scope: "request" does NOT share results between concurrent requests', async () => {
+    const results: number[] = [];
+    class Svc {
+      @Memoize({ scope: 'request' })
+      async getUser(id: number) { return id * 10; }
+    }
+    const svc = new Svc();
+
+    await Promise.all([
+      runWithMemoScope(async () => { results.push(await svc.getUser(1)); }),
+      runWithMemoScope(async () => { results.push(await svc.getUser(2)); }),
+    ]);
+
+    expect(results).toContain(10);
+    expect(results).toContain(20);
+  });
 });
 
 /* ================= VALIDATE RESULT ================= */
@@ -673,7 +763,7 @@ describe('@Audit', () => {
     }
     await new Svc().remove();
     expect(logged.length).toBe(1);
-    expect((logged[0] as { action: string }).action).toBe('user.delete');
+    expect((logged[0] as { action: string; }).action).toBe('user.delete');
   });
 });
 
@@ -710,7 +800,7 @@ describe('@Transaction', () => {
     let txUsed = false;
     const prismaExecutor: TransactionExecutor = (db, run) => {
       txUsed = true;
-      return (db as { $transaction: typeof run }).$transaction(run);
+      return (db as { $transaction: typeof run; }).$transaction(run);
     };
 
     const fakePrisma = {
@@ -732,7 +822,7 @@ describe('@Transaction', () => {
     let txUsed = false;
     const kyselyExecutor: TransactionExecutor = (db, run) => {
       txUsed = true;
-      return (db as { transaction: () => { execute: typeof run } })
+      return (db as { transaction: () => { execute: typeof run; }; })
         .transaction()
         .execute(run);
     };
