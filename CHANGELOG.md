@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.1 (2026-05-05)
+
 All notable changes to `hono-forge` will be documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
