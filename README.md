@@ -2,7 +2,7 @@
 
 NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dependency injection, guards, SSE, WebSocket, channels, OpenAPI, and more.
 
-**[📖 Documentation](https://frontend-hono-template-decorator.vercel.app/)** · **[npm](https://www.npmjs.com/package/hono-forge)** · **[GitHub](https://github.com/Mad1Duck/hono-decorator)** · **[Changelog](./CHANGELOG.md)**
+**[📖 Documentation](https://frontend-hono-template-decorator.vercel.app/)** · **[npm](https://www.npmjs.com/package/hono-forge)** · **[GitHub](https://github.com/Mad1Duck/hono-decorator)** · **[Changelog](./CHANGELOG.md)**  · **[Feedback](https://wall-message-frontend.vercel.app/message/gandhi/hono-forge)**
 
 ## Features
 
