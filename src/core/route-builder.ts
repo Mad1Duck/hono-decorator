@@ -507,11 +507,15 @@ export class HonoRouteBuilder {
     }
     const fullPath = `${basePath}${path}`;
 
+    // Register both with and without trailing slash for better API compatibility
+    const fullPathWithSlash = fullPath.endsWith('/') ? fullPath : `${fullPath}/`;
+    const fullPathNoSlash = fullPath.endsWith('/') ? fullPath.slice(0, -1) || '/' : fullPath;
+
     // Hono's generic types can't infer spread middleware arrays via app[method](),
     // so we cast to a narrower interface that exposes exactly what we need.
     type HonoWithOn = { on(method: string, path: string, ...handlers: HonoMiddlewareFn[]): Hono; };
-    const register = (m: string, ...handlers: HonoMiddlewareFn[]) =>
-      (app as unknown as HonoWithOn).on(m.toUpperCase(), fullPath, ...handlers);
+    const register = (routePath: string) => (m: string, ...handlers: HonoMiddlewareFn[]) =>
+      (app as unknown as HonoWithOn).on(m.toUpperCase(), routePath, ...handlers);
 
     const requestLogger = this.config.requestLogger;
     const onRequestStart = this.config.onRequestStart;
@@ -522,7 +526,7 @@ export class HonoRouteBuilder {
     ) as boolean | undefined;
 
     if (isSse) {
-      register('GET', ...middlewares, ((c: Context) => {
+      const sseHandler = ((c: Context) => {
         const startMs = Date.now();
         const ua = extractUserAgent(c);
         const traceId = c.req.header('x-request-id') ?? crypto.randomUUID();
@@ -539,7 +543,11 @@ export class HonoRouteBuilder {
             await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
           }
         });
-      }) as unknown as HonoMiddlewareFn);
+      }) as unknown as HonoMiddlewareFn;
+      register(fullPathNoSlash)('GET', ...middlewares, sseHandler);
+      if (fullPathWithSlash !== fullPathNoSlash) {
+        register(fullPathWithSlash)('GET', ...middlewares, sseHandler);
+      }
       return;
     }
 
@@ -574,7 +582,10 @@ export class HonoRouteBuilder {
 
         return result;
       });
-      register('GET', ...middlewares, wsHandler);
+      register(fullPathNoSlash)('GET', ...middlewares, wsHandler);
+      if (fullPathWithSlash !== fullPathNoSlash) {
+        register(fullPathWithSlash)('GET', ...middlewares, wsHandler);
+      }
       return;
     }
 
@@ -662,7 +673,10 @@ export class HonoRouteBuilder {
     // Hono doesn't route app.on('HEAD',...) — register as GET so Hono's
     // automatic HEAD-for-GET fallback returns correct headers with no body.
     const httpMethod = method === 'head' ? 'GET' : method;
-    register(httpMethod, ...middlewares, httpHandler);
+    register(fullPathNoSlash)(httpMethod, ...middlewares, httpHandler);
+    if (fullPathWithSlash !== fullPathNoSlash) {
+      register(fullPathWithSlash)(httpMethod, ...middlewares, httpHandler);
+    }
   }
 
   /* ---------- PARAM RESOLVER ---------- */
