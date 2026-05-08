@@ -174,6 +174,18 @@ export interface RouteBuilderConfig {
   onRequestStart?: RequestStartHook;
 
   /**
+   * Controls how trailing slashes in URLs are handled.
+   *
+   * - `'ignore'` (default) — trailing slashes are treated as different routes (Hono default)
+   * - `'strip'` — redirects `/path/` to `/path` (removes trailing slash)
+   * - `'add'` — redirects `/path` to `/path/` (adds trailing slash)
+   *
+   * @example
+   * HonoRouteBuilder.configure({ trailingSlash: 'strip' });
+   */
+  trailingSlash?: 'ignore' | 'strip' | 'add';
+
+  /**
    * Enforce that mutation routes (POST, PUT, PATCH) always use a validated body schema.
    *
    * - `'warn'` (default) — logs a `console.warn` at `build()` time when a mutation route
@@ -220,6 +232,28 @@ export class HonoRouteBuilder {
     options?: { excludePrivate?: boolean; }
   ): Hono {
     const app = new Hono();
+
+    /* ----- Trailing Slash Normalization ----- */
+    const trailingSlashMode = this.config.trailingSlash ?? 'ignore';
+    if (trailingSlashMode !== 'ignore') {
+      app.use('*', async (c, next) => {
+        const url = new URL(c.req.url);
+        const hasTrailingSlash = url.pathname.endsWith('/') && url.pathname !== '/';
+        const needsTrailingSlash = trailingSlashMode === 'add';
+
+        if (needsTrailingSlash && !hasTrailingSlash && url.pathname !== '/') {
+          url.pathname = url.pathname + '/';
+          return c.redirect(url.toString(), 301);
+        }
+
+        if (!needsTrailingSlash && hasTrailingSlash) {
+          url.pathname = url.pathname.slice(0, -1) || '/';
+          return c.redirect(url.toString(), 301);
+        }
+
+        await next();
+      });
+    }
 
     /* ----- Controller Metadata ----- */
     const controllerMetadata = Reflect.getMetadata(
