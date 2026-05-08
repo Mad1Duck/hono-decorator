@@ -50,6 +50,7 @@ export interface ParamMetadata {
   | 'user'
   | 'req'
   | 'res'
+  | 'ctx'
   | 'next'
   | 'sse'
   | 'ip'
@@ -57,7 +58,9 @@ export interface ParamMetadata {
   | 'useragent'
   | 'uploadedfile'
   | 'uploadedfiles'
-  | 'formbody';
+  | 'formbody'
+  | 'cookie'
+  | 'cookies';
 
   index: number;
   name?: string;

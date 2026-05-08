@@ -479,17 +479,85 @@ app.route('/', HonoRouteBuilder.build(UserController, 'mobile'));
 
 | Decorator | Injects |
 |-----------|---------|
-| `@Body()` | `await c.req.json()` |
-| `@Query()` | `c.req.query()` |
+| `@Body()` | `await c.req.json()` — full body |
+| `@Body('field')` | Single field extracted from body |
+| `@Query()` | `c.req.query()` — all query params as object |
+| `@Query('name')` | `c.req.query('name')` — individual query param |
 | `@Param(name)` | `c.req.param(name)` |
 | `@Headers(name)` | `c.req.header(name)` |
 | `@User()` | `c.get('user')` — set by guard |
+| `@Cookie('name')` | Individual cookie value by name |
+| `@Cookies()` | All cookies as `Record<string, string>` |
 | `@Ip()` | Real client IP (CF-Connecting-IP → X-Real-IP → X-Forwarded-For) |
 | `@Device()` | `'mobile' \| 'tablet' \| 'desktop' \| 'bot'` |
 | `@UserAgent()` | Raw `User-Agent` header string |
 | `@Req()` | Hono `HonoRequest` |
-| `@Res()` | Hono `Context` |
+| `@Ctx()` | Hono `Context` `c` — preferred over `@Res()` |
+| `@Res()` | Hono `Context` `c` — alias for `@Ctx()`, kept for compatibility |
 | `@SseStream()` | SSE stream (inside `@Sse` handlers) |
+| ~~`@Next()`~~ | **Deprecated** — always `undefined`; Hono has no Express-style next callback |
+
+### Cookies
+
+```ts
+@Get('/profile')
+@RequireAuth()
+profile(
+  @Cookie('session') session: string,
+  @User() user: any,
+) {
+  return { session, user };
+}
+
+@Get('/debug')
+allCookies(@Cookies() cookies: Record<string, string>) {
+  return cookies;
+}
+```
+
+### Direct Context access with `@Ctx()`
+
+Use `@Ctx()` when you need the raw Hono `Context` — for setting cookies, redirecting, or accessing Hono-specific features not covered by other decorators:
+
+```ts
+import type { Context } from 'hono';
+
+@Get('/redirect')
+redirect(@Ctx() c: Context) {
+  return c.redirect('/new-path');
+}
+
+@Post('/login')
+async login(@Body(LoginSchema) body: any, @Ctx() c: Context) {
+  const token = await this.authService.login(body);
+  c.header('Set-Cookie', `token=${token}; HttpOnly; Path=/`);
+  return { ok: true };
+}
+```
+
+> `@Res()` is a kept alias for `@Ctx()` — both inject the Hono `Context`. Prefer `@Ctx()` for clarity since it accurately describes what is injected.
+
+### Individual field extraction
+
+Pass a string name to `@Body` or `@Query` to extract a single field:
+
+```ts
+@Get()
+list(
+  @Query('page') page: string,
+  @Query('limit') limit: string,
+) {
+  return this.repo.findAll({ page: Number(page), limit: Number(limit) });
+}
+
+@Post()
+async create(
+  @Body('name') name: string,
+  @Body('email') email: string,
+) {
+  return this.repo.create({ name, email });
+}
+```
 
 ### With Zod validation
 
@@ -594,6 +662,27 @@ HonoRouteBuilder.configure({
 @Public()                                  // skips guards entirely
 @Private()                                 // marks route as internal-only
 ```
+
+### Accessing authenticated user with `@User()`
+
+When using `@RequireAuth()`, the guard executor sets the user in the context. Use the `@User()` decorator to retrieve it in your handler:
+
+```ts
+@Get('/me')
+@RequireAuth()
+async me(@User() user: any) {
+  return { address: user.address, roles: user.roles };
+}
+
+@Post('/users')
+@RequireAuth()
+async create(@User() user: any, @Body(CreateUserSchema) body: any) {
+  // user is authenticated; body is validated
+  return this.userService.create(user.address, body);
+}
+```
+
+**Important:** Do not try to access the Context directly (e.g., `c.get('user')`). Always use the `@User()` decorator — it's the only supported way to access the authenticated user in decorated methods.
 
 ### `@Private`
 
@@ -1142,7 +1231,7 @@ import 'reflect-metadata';
 import { Hono } from 'hono';
 import {
   Controller, Get, Post, Delete, Sse,
-  Body, Param, User, Ip, Device, SseStream,
+  Body, Query, Param, User, Ctx, Cookie, Cookies, Ip, Device, SseStream,
   RequireAuth, RequireRole, Public,
   Injectable, Singleton,
   HonoRouteBuilder, container,

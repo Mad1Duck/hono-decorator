@@ -22,6 +22,19 @@ import type {
 } from '../decorators/metadata';
 import type { AbstractConstructor, ConcreteConstructor, ControllerConstructor, ControllerInstance } from './types';
 
+/* ================= HELPERS ================= */
+
+function parseCookies(cookieHeader: string): Record<string, string> {
+  return Object.fromEntries(
+    cookieHeader.split(';').filter(Boolean).map((s) => {
+      const eqIdx = s.indexOf('=');
+      const key = s.slice(0, eqIdx).trim();
+      const val = s.slice(eqIdx + 1).trim();
+      return [key, decodeURIComponent(val)];
+    })
+  );
+}
+
 /* ================= TYPES ================= */
 
 /**
@@ -705,7 +718,12 @@ export class HonoRouteBuilder {
       switch (param.type) {
         case 'body': {
           const body = await c.req.json();
-          value = param.schema ? await param.schema.parseAsync(body) : body;
+          if (param.name) {
+            const raw = (body as Record<string, unknown>)[param.name];
+            value = param.schema ? await param.schema.parseAsync(raw) : raw;
+          } else {
+            value = param.schema ? await param.schema.parseAsync(body) : body;
+          }
           break;
         }
 
@@ -719,8 +737,13 @@ export class HonoRouteBuilder {
         }
 
         case 'query': {
-          const query = c.req.query();
-          value = param.schema ? await param.schema.parseAsync(query) : query;
+          if (param.name) {
+            const raw = c.req.query(param.name);
+            value = param.schema ? await param.schema.parseAsync(raw) : raw;
+          } else {
+            const query = c.req.query();
+            value = param.schema ? await param.schema.parseAsync(query) : query;
+          }
           break;
         }
 
@@ -740,13 +763,27 @@ export class HonoRouteBuilder {
           break;
         }
 
-        case 'res': {
+        case 'res':
+        case 'ctx': {
           value = c;
           break;
         }
 
         case 'next': {
           value = undefined;
+          break;
+        }
+
+        case 'cookie': {
+          const cookieHeader = c.req.header('cookie') ?? '';
+          const cookies = parseCookies(cookieHeader);
+          value = param.name ? cookies[param.name] : undefined;
+          break;
+        }
+
+        case 'cookies': {
+          const cookieHeader = c.req.header('cookie') ?? '';
+          value = parseCookies(cookieHeader);
           break;
         }
 

@@ -86,6 +86,15 @@ export const Req =
 export const Res =
   createParamDecorator('res');
 
+/** Injects the Hono Context `c` directly. Prefer this over `@Res()` for clarity. */
+export const Ctx =
+  createParamDecorator('ctx');
+
+/**
+ * @deprecated `@Next()` always returns `undefined` in Hono's request model.
+ * Hono middleware uses `await next()` internally — there is no Express-style next callback.
+ * Remove this decorator from your handlers.
+ */
 export const Next =
   createParamDecorator('next');
 
@@ -103,6 +112,16 @@ export const Device =
 /** Injects the raw User-Agent header string. */
 export const UserAgent =
   createParamDecorator('useragent');
+
+/** Injects a single cookie value by name. */
+export function Cookie(name: string): ParameterDecorator {
+  return createParamDecorator('cookie')(name);
+}
+
+/** Injects all cookies as a `Record<string, string>`. */
+export function Cookies(): ParameterDecorator {
+  return createParamDecorator('cookies')();
+}
 
 /* ================= FILE UPLOAD ================= */
 
