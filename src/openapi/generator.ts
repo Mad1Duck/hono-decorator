@@ -87,7 +87,7 @@ export class OpenAPIGenerator {
       const controllerMeta = Reflect.getMetadata(
         METADATA_KEYS.CONTROLLER,
         ControllerClass
-      ) as { basePath: string } | undefined;
+      ) as { basePath: string; } | undefined;
 
       if (!controllerMeta) continue;
 
@@ -103,6 +103,7 @@ export class OpenAPIGenerator {
       ) as OpenAPIMetadata | undefined) ?? {};
 
       const proto = ControllerClass.prototype as object;
+      const controllerName = ControllerClass.name;
 
       for (const route of routes) {
         // Skip methods that don't map cleanly to OpenAPI operations
@@ -217,7 +218,7 @@ export class OpenAPIGenerator {
         /* --- Build operation --- */
         const descriptionPrefix = isSse ? '(SSE stream) ' : isWs ? '(WebSocket upgrade) ' : '';
         const operation = compact({
-          operationId: `${openApiMethod}_${handlerName}`,
+          operationId: `${controllerName}_${handlerName}_${openApiMethod}`,
           summary: methodMeta.summary,
           description: methodMeta.description ? `${descriptionPrefix}${methodMeta.description}` : (isSse || isWs ? descriptionPrefix.trim() : undefined),
           tags: tags.length > 0 ? tags : undefined,
