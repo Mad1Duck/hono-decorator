@@ -218,7 +218,7 @@ export class OpenAPIGenerator {
         /* --- Build operation --- */
         const descriptionPrefix = isSse ? '(SSE stream) ' : isWs ? '(WebSocket upgrade) ' : '';
         const operation = compact({
-          operationId: `${controllerName}_${handlerName}_${openApiMethod}`,
+          operationId: `${openApiMethod}_${handlerName}`,
           summary: methodMeta.summary,
           description: methodMeta.description ? `${descriptionPrefix}${methodMeta.description}` : (isSse || isWs ? descriptionPrefix.trim() : undefined),
           tags: tags.length > 0 ? tags : undefined,
