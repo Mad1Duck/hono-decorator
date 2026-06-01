@@ -21,6 +21,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `reflect-metadata` is now bundled inline into the library output — consumers no longer need to install or import it manually. Previously it was marked as `external` in the build config, which caused resolution failures with pnpm and strict bundlers.
+
 ### Added
 
 #### Error Handling

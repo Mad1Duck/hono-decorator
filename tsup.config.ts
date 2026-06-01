@@ -6,7 +6,8 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ['hono', 'zod', 'reflect-metadata'],
+  external: ['hono', 'zod'],
+  noExternal: ['reflect-metadata'],
   esbuildOptions(options) {
     options.target = 'es2022';
   },
