@@ -1,4 +1,3 @@
-import 'reflect-metadata';
 import { describe, it, expect, beforeEach } from 'bun:test';
 import {
   Container,
@@ -6,7 +5,6 @@ import {
   Singleton,
   Stateless,
   RequestScoped,
-  Inject,
   CircularDependencyError,
   DependencyResolutionError,
 } from '../src';
@@ -17,16 +15,16 @@ import type { OnInit, OnDestroy } from '../src';
 @Injectable()
 class SimpleDep { value = 42; }
 
-@Injectable()
+@Injectable([SimpleDep])
 class SimpleService { constructor(public dep: SimpleDep) { } }
 
 @Injectable()
 class NodeA { }
 
-@Injectable()
+@Injectable([NodeA])
 class NodeB { constructor(public a: NodeA) { } }
 
-@Injectable()
+@Injectable([NodeB])
 class NodeC { constructor(public b: NodeB) { } }
 
 @Injectable()
@@ -36,19 +34,19 @@ class SingletonService { id = Math.random(); }
 @Injectable()
 class TransientService { id = Math.random(); }
 
-/* ---- classes for @Inject token tests ---- */
+/* ---- classes for token injection tests ---- */
 
 const LOGGER_TOKEN = Symbol('logger');
 const CONFIG_TOKEN = 'CONFIG_TOKEN';
 
-@Injectable()
+@Injectable([LOGGER_TOKEN])
 class SvcWithSymbolInject {
-  constructor(@Inject(LOGGER_TOKEN) public logger: unknown) { }
+  constructor(public logger: unknown) { }
 }
 
-@Injectable()
+@Injectable([CONFIG_TOKEN])
 class SvcWithStringInject {
-  constructor(@Inject(CONFIG_TOKEN) public config: unknown) { }
+  constructor(public config: unknown) { }
 }
 
 /* ---- classes for error tests ---- */
@@ -56,7 +54,7 @@ class SvcWithStringInject {
 @Injectable()
 class FailingDep { }
 
-@Injectable()
+@Injectable([FailingDep])
 class SvcThatDependsOnFailingDep {
   constructor(public dep: FailingDep) { }
 }
@@ -132,14 +130,14 @@ describe('Container', () => {
     expect(c.resolve(DB as never) as typeof fakeDb).toBe(fakeDb);
   });
 
-  it('registerInstance allows injecting external objects via @Inject', () => {
+  it('registerInstance allows injecting external objects via explicit token', () => {
     const REDIS = Symbol('redis');
     const fakeRedis = { get: (_k: string) => null };
     c.registerInstance(REDIS, fakeRedis);
 
-    @Injectable()
+    @Injectable([REDIS])
     class CacheService {
-      constructor(@Inject(REDIS) public redis: typeof fakeRedis) { }
+      constructor(public redis: typeof fakeRedis) { }
     }
 
     const svc = c.resolve(CacheService);
@@ -164,16 +162,16 @@ describe('Container', () => {
     expect(a.id).not.toBe(b.id);
   });
 
-  /* -------- @Inject token -------- */
+  /* -------- token injection -------- */
 
-  it('@Inject resolves by symbol token', () => {
+  it('resolves by symbol token declared in @Injectable', () => {
     const logger = { log: () => { } };
     c.registerSingleton(LOGGER_TOKEN, logger);
     const instance = c.resolve(SvcWithSymbolInject);
     expect(instance.logger as typeof logger).toBe(logger);
   });
 
-  it('@Inject resolves by string token', () => {
+  it('resolves by string token declared in @Injectable', () => {
     const config = { debug: true };
     c.registerSingleton(CONFIG_TOKEN, config);
     const instance = c.resolve(SvcWithStringInject);
@@ -235,21 +233,13 @@ describe('Container', () => {
   /* -------- errors -------- */
 
   it('throws DependencyResolutionError when a factory dependency fails', () => {
-    c.registerFactory(FailingDep, () => {
-      throw new Error('Connection refused');
-    });
+    c.registerFactory(FailingDep, () => { throw new Error('Connection refused'); });
     expect(() => c.resolve(SvcThatDependsOnFailingDep)).toThrow(DependencyResolutionError);
   });
 
   it('throws CircularDependencyError for circular factory dependencies', () => {
-    c.registerFactory(CircularA, () => {
-      c.resolve(CircularB);
-      return new CircularA();
-    });
-    c.registerFactory(CircularB, () => {
-      c.resolve(CircularA);
-      return new CircularB();
-    });
+    c.registerFactory(CircularA, () => { c.resolve(CircularB); return new CircularA(); });
+    c.registerFactory(CircularB, () => { c.resolve(CircularA); return new CircularB(); });
     expect(() => c.resolve(CircularA)).toThrow(CircularDependencyError);
   });
 
@@ -301,7 +291,7 @@ describe('Container', () => {
 
       await c.runInScope(async () => {
         c.resolve(ScopedSvc);
-        expect(log).toHaveLength(0); // not yet
+        expect(log).toHaveLength(0);
       });
 
       expect(log).toEqual(['destroyed']);
@@ -347,8 +337,7 @@ describe('Container', () => {
         value = 1;
       }
       const instance = c.resolve(MutatingRepo);
-      expect(() => { (instance as { value: number; }).value = 2; })
-        .toThrow(/stateless/i);
+      expect(() => { (instance as { value: number; }).value = 2; }).toThrow(/stateless/i);
     });
 
     it('error message includes the class name', () => {
@@ -359,8 +348,7 @@ describe('Container', () => {
         state = 0;
       }
       const instance = c.resolve(NamedRepo);
-      expect(() => { (instance as { state: number; }).state = 99; })
-        .toThrow('NamedRepo');
+      expect(() => { (instance as { state: number; }).state = 99; }).toThrow('NamedRepo');
     });
 
     it('returns same (proxied) instance on repeated resolve', () => {
@@ -419,7 +407,7 @@ describe('Container', () => {
       c.registerInstance(SvcC, new SvcC());
 
       await c.shutdown();
-      expect(log).toEqual(['C', 'B', 'A']); // reverse order
+      expect(log).toEqual(['C', 'B', 'A']);
     });
 
     it('shutdown() skips instances without onDestroy', async () => {

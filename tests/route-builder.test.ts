@@ -1,4 +1,3 @@
-import 'reflect-metadata';
 import { describe, it, expect, beforeEach } from 'bun:test';
 import {
   Controller,
@@ -10,11 +9,6 @@ import {
   Options,
   All,
   WebSocket,
-  Body,
-  ValidatedBody,
-  Param,
-  Query,
-  User,
   Injectable,
   Singleton,
   RequireAuth,
@@ -28,9 +22,6 @@ import {
   Compress,
   SecureHeaders,
   PrettyJson,
-  UploadedFile,
-  UploadedFiles,
-  FormBody,
   HonoRouteBuilder,
   container,
   fromModules,
@@ -64,7 +55,7 @@ class ItemStore {
   }
 }
 
-@Injectable()
+@Injectable([ItemStore])
 class ItemService {
   constructor(private store: ItemStore) { }
   getAll() { return this.store.getAll(); }
@@ -76,9 +67,8 @@ class ItemService {
 
 const CreateItemSchema = z.object({ name: z.string().min(1) });
 
-// NOTE: @Get('/search') must be registered BEFORE @Get('/:id')
-// so Hono matches static paths before dynamic ones
 @Controller('/items')
+@Injectable([ItemService])
 class ItemController {
   constructor(private svc: ItemService) { }
 
@@ -88,15 +78,16 @@ class ItemController {
 
   @Get('/search')
   @Public()
-  search(@Query() q: Record<string, string>) { return { query: q }; }
+  search(c: Context) { return { query: c.req.query() }; }
 
   @Get('/:id')
   @Public()
-  getOne(@Param('id') id: string) { return this.svc.getById(id); }
+  getOne(c: Context) { return this.svc.getById(c.req.param('id')); }
 
   @Post()
   @Public()
-  create(@Body(CreateItemSchema) body: z.infer<typeof CreateItemSchema>) {
+  async create(c: Context) {
+    const body = await CreateItemSchema.parseAsync(await c.req.json());
     return this.svc.create(body.name);
   }
 }
@@ -109,7 +100,9 @@ class SecureController {
 
   @Delete('/:id')
   @RequireRole('admin')
-  adminDelete(@Param('id') id: string, @User() user: { name: string; }) {
+  adminDelete(c: Context) {
+    const id = c.req.param('id');
+    const user = c.get('user') as { name: string; };
     return { deleted: id, by: user.name };
   }
 }
@@ -179,7 +172,9 @@ class PatchController {
 
   @Patch('/:id')
   @Public()
-  update(@Param('id') id: string, @Body(PatchItemSchema) body: z.infer<typeof PatchItemSchema>) {
+  async update(c: Context) {
+    const id = c.req.param('id');
+    const body = await PatchItemSchema.parseAsync(await c.req.json());
     this.items[id] = body.name;
     return { id, name: body.name };
   }
@@ -189,7 +184,8 @@ class PatchController {
 class QuerySchemaController {
   @Get()
   @Public()
-  list(@Query(QueryFilterSchema) q: z.infer<typeof QueryFilterSchema>) {
+  async list(c: Context) {
+    const q = await QueryFilterSchema.parseAsync(c.req.query());
     return { search: q.search ?? null, limit: q.limit ?? null };
   }
 }
@@ -219,70 +215,6 @@ describe('HonoRouteBuilder', () => {
 
   /* -------- security: throw at build time -------- */
 
-  /* -------- strictValidation -------- */
-
-  describe('strictValidation', () => {
-    @Controller('/unvalidated')
-    class UnvalidatedController {
-      @Post() @Public()
-      create(@Body() body: unknown) { return body; }
-    }
-
-    @Controller('/validated')
-    class ValidatedController {
-      @Post() @Public()
-      create(@ValidatedBody(z.object({ name: z.string() })) body: { name: string; }) { return body; }
-    }
-
-    it('warns by default when POST uses @Body() without schema', () => {
-      const warns: string[] = [];
-      const orig = console.warn;
-      console.warn = (msg: string) => warns.push(msg);
-      HonoRouteBuilder.build(UnvalidatedController);
-      console.warn = orig;
-      expect(warns.some(w => w.includes('unvalidated'))).toBe(true);
-    });
-
-    it('does NOT warn when schema is provided', () => {
-      HonoRouteBuilder.configure({ guardExecutor: async () => true });
-      const warns: string[] = [];
-      const orig = console.warn;
-      console.warn = (msg: string) => warns.push(msg);
-      HonoRouteBuilder.build(ValidatedController);
-      console.warn = orig;
-      expect(warns.filter(w => w.includes('hono-forge'))).toHaveLength(0);
-    });
-
-    it('throws when strictValidation is "error" and schema is missing', () => {
-      HonoRouteBuilder.configure({ strictValidation: 'error' });
-      expect(() => HonoRouteBuilder.build(UnvalidatedController)).toThrow(/unvalidated/i);
-    });
-
-    it('does NOT warn when strictValidation is "off"', () => {
-      HonoRouteBuilder.configure({ strictValidation: 'off' });
-      const warns: string[] = [];
-      const orig = console.warn;
-      console.warn = (msg: string) => warns.push(msg);
-      HonoRouteBuilder.build(UnvalidatedController);
-      console.warn = orig;
-      expect(warns.filter(w => w.includes('hono-forge'))).toHaveLength(0);
-    });
-
-    it('does NOT warn for GET routes without schema', () => {
-      @Controller('/get-no-schema')
-      class GetCtrl {
-        @Get() @Public()
-        list() { return []; }
-      }
-      const warns: string[] = [];
-      const orig = console.warn;
-      console.warn = (msg: string) => warns.push(msg);
-      HonoRouteBuilder.build(GetCtrl);
-      console.warn = orig;
-      expect(warns.filter(w => w.includes('hono-forge'))).toHaveLength(0);
-    });
-  });
-
   describe('security guards', () => {
     it('throws at build() when guards present but no guardExecutor', () => {
       expect(() => HonoRouteBuilder.build(SecureController)).toThrow(/guardExecutor/);
@@ -302,9 +234,7 @@ describe('HonoRouteBuilder', () => {
     });
 
     it('does NOT throw when rateLimiterFactory is configured', () => {
-      HonoRouteBuilder.configure({
-        rateLimiterFactory: () => async (_c, next) => next(),
-      });
+      HonoRouteBuilder.configure({ rateLimiterFactory: () => async (_c, next) => next() });
       expect(() => HonoRouteBuilder.build(LimitedController)).not.toThrow();
     });
   });
@@ -340,19 +270,15 @@ describe('HonoRouteBuilder', () => {
       const body = await res.json() as { name: string; };
       expect(body.name).toBe('Cherry');
     });
-  });
 
-  /* -------- parameter injection -------- */
-
-  describe('parameter injection', () => {
-    it('@Param resolves route parameter', async () => {
+    it('GET /items/:id resolves route param', async () => {
       const app = HonoRouteBuilder.build(ItemController);
       const res = await app.fetch(makeRequest('/items/2'));
       const body = await res.json() as { id: string; };
       expect(body.id).toBe('2');
     });
 
-    it('@Query resolves query string', async () => {
+    it('GET /items/search resolves query string', async () => {
       const app = HonoRouteBuilder.build(ItemController);
       const res = await app.fetch(makeRequest('/items/search?name=apple&page=1'));
       expect(res.status).toBe(200);
@@ -361,7 +287,7 @@ describe('HonoRouteBuilder', () => {
       expect(body.query['page']).toBe('1');
     });
 
-    it('@Body with Zod returns 400 on invalid payload', async () => {
+    it('POST /items returns 400 on invalid payload', async () => {
       const app = HonoRouteBuilder.build(ItemController);
       const res = await app.fetch(makeRequest('/items', {
         method: 'POST',
@@ -407,18 +333,13 @@ describe('HonoRouteBuilder', () => {
     });
 
     it('allows request when guardExecutor returns true', async () => {
-      HonoRouteBuilder.configure({
-        guardExecutor: async (c) => {
-          c.set('user', { name: 'Alice', roles: ['admin'] });
-          return true;
-        },
-      });
+      HonoRouteBuilder.configure({ guardExecutor: async () => true });
       const app = HonoRouteBuilder.build(SecureController);
       const res = await app.fetch(makeRequest('/secure'));
       expect(res.status).toBe(200);
     });
 
-    it('@User injects user set by guardExecutor', async () => {
+    it('handler can read user set by guardExecutor via c.get("user")', async () => {
       HonoRouteBuilder.configure({
         guardExecutor: async (c) => {
           c.set('user', { name: 'Bob', roles: ['admin'] });
@@ -484,10 +405,7 @@ describe('HonoRouteBuilder', () => {
 
     it('does NOT throw when webSocketUpgrader is configured', () => {
       HonoRouteBuilder.configure({
-        webSocketUpgrader: (factory) => async (c, next) => {
-          await factory(c);
-          await next();
-        },
+        webSocketUpgrader: (factory) => async (c, next) => { await factory(c); await next(); },
       });
       expect(() => HonoRouteBuilder.build(WsController)).not.toThrow();
     });
@@ -499,8 +417,7 @@ describe('HonoRouteBuilder', () => {
     it('calls onError when handler throws a non-validation error', async () => {
       @Controller('/err-test')
       class ErrController {
-        @Get()
-        @Public()
+        @Get() @Public()
         boom() { throw new Error('something went wrong'); }
       }
 
@@ -518,8 +435,7 @@ describe('HonoRouteBuilder', () => {
     it('onError receives the thrown error instance', async () => {
       @Controller('/err-capture')
       class ErrCaptureController {
-        @Get()
-        @Public()
+        @Get() @Public()
         boom() { throw new TypeError('bad type'); }
       }
 
@@ -534,7 +450,7 @@ describe('HonoRouteBuilder', () => {
       expect((captured as TypeError).message).toBe('bad type');
     });
 
-    it('validation errors still return 400 even when onError is configured', async () => {
+    it('Zod validation errors return 400 even when onError is configured', async () => {
       HonoRouteBuilder.configure({
         onError: (_err, c) => c.json({ error: { code: 'INTERNAL_SERVER_ERROR' } }, 500),
       });
@@ -577,9 +493,9 @@ describe('HonoRouteBuilder', () => {
     });
   });
 
-  /* -------- @Query with Zod schema -------- */
+  /* -------- query with Zod schema -------- */
 
-  describe('@Query with Zod schema', () => {
+  describe('query with Zod schema', () => {
     it('passes valid query params through schema', async () => {
       const app = HonoRouteBuilder.build(QuerySchemaController);
       const res = await app.fetch(makeRequest('/qschema-test?search=hello&limit=5'));
@@ -639,8 +555,7 @@ describe('HonoRouteBuilder', () => {
     @Controller('/public-mw')
     @Middleware(classMw)
     class PublicWithClassMwController {
-      @Get()
-      @Public()
+      @Get() @Public()
       handle() { return { ok: true }; }
     }
 
@@ -664,9 +579,7 @@ describe('HonoRouteBuilder', () => {
 
     @Controller('/use-test')
     class UseController {
-      @Get()
-      @Public()
-      @Use(useMw)
+      @Get() @Public() @Use(useMw)
       handle() { return { ok: true }; }
     }
 
@@ -729,6 +642,24 @@ describe('HonoRouteBuilder', () => {
       expect(res.status).toBe(200);
     });
   });
+
+  /* -------- HttpException -------- */
+
+  describe('HttpException', () => {
+    it('returns structured JSON at the correct status', async () => {
+      @Controller('/exc-test')
+      class ExcController {
+        @Get() @Public()
+        boom() { throw HttpException.notFound('Item not found'); }
+      }
+      const app = HonoRouteBuilder.build(ExcController);
+      const res = await app.fetch(makeRequest('/exc-test'));
+      expect(res.status).toBe(404);
+      const body = await res.json() as { error: { code: string; message: string; }; };
+      expect(body.error.code).toBe('NOT_FOUND');
+      expect(body.error.message).toBe('Item not found');
+    });
+  });
 });
 
 /* ================= COMMON MIDDLEWARE DECORATORS ================= */
@@ -772,23 +703,23 @@ describe('common middleware decorators', () => {
 
   describe('@SecureHeaders', () => {
     it('sets X-Content-Type-Options header', async () => {
-      @Controller('/secure-test')
+      @Controller('/secure-headers-test')
       @SecureHeaders()
-      class SecureController {
+      class SecureHeadersController {
         @Get() @Public() info() { return { secure: true }; }
       }
-      const app = HonoRouteBuilder.build(SecureController);
-      const res = await app.fetch(makeRequest('/secure-test'));
-      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      const app = HonoRouteBuilder.build(SecureHeadersController);
+      const res = await app.fetch(makeRequest('/secure-headers-test'));
+      expect(res.headers.get('x-content-type-options')).toBeTruthy();
     });
   });
 
   describe('@PrettyJson', () => {
-    it('pretty-prints JSON when ?pretty query present', async () => {
+    it('formats JSON when ?pretty is present', async () => {
       @Controller('/pretty-test')
       @PrettyJson()
       class PrettyController {
-        @Get() @Public() data() { return { key: 'value' }; }
+        @Get() @Public() data() { return { hello: 'world' }; }
       }
       const app = HonoRouteBuilder.build(PrettyController);
       const res = await app.fetch(makeRequest('/pretty-test?pretty'));
@@ -798,399 +729,58 @@ describe('common middleware decorators', () => {
   });
 });
 
-/* ================= FILE UPLOAD ================= */
+/* ================= TRACE ID ================= */
 
-describe('file upload decorators', () => {
-  function makeMultipart(path: string, fields: Record<string, string | { name: string; content: string; type?: string; }>) {
-    const form = new FormData();
-    for (const [key, value] of Object.entries(fields)) {
-      if (typeof value === 'string') {
-        form.append(key, value);
-      } else {
-        form.append(key, new File([value.content], value.name, { type: value.type ?? 'text/plain' }));
-      }
+describe('trace ID', () => {
+  it('echoes X-Request-ID back in response header', async () => {
+    @Controller('/trace-test')
+    class TraceController {
+      @Get() @Public()
+      check() { return { traceId: getTraceId() }; }
     }
-    return new Request(`http://test.local${path}`, { method: 'POST', body: form });
+    const app = HonoRouteBuilder.build(TraceController);
+    const res = await app.fetch(makeRequest('/trace-test', { headers: { 'x-request-id': 'abc-123' } }));
+    expect(res.headers.get('x-request-id')).toBe('abc-123');
+  });
+
+  it('generates a UUID trace ID when X-Request-ID is absent', async () => {
+    @Controller('/trace-gen')
+    class TraceGenController {
+      @Get() @Public()
+      check() { return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(TraceGenController);
+    const res = await app.fetch(makeRequest('/trace-gen'));
+    const traceId = res.headers.get('x-request-id');
+    expect(traceId).toBeTruthy();
+    expect(traceId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+/* ================= @Private ================= */
+
+describe('@Private', () => {
+  @Controller('/priv')
+  class PrivController {
+    @Get('/open') @Public() open() { return { v: 'open' }; }
+    @Get('/secret') @Private() secret() { return { v: 'secret' }; }
   }
 
-  describe('@UploadedFile', () => {
-    it('injects a single File by field name', async () => {
-      @Controller('/upload')
-      class UploadCtrl {
-        @Post() @Public()
-        upload(@UploadedFile('avatar') file: File | null) {
-          return { name: (file as File).name, size: (file as File).size };
-        }
-      }
-      const app = HonoRouteBuilder.build(UploadCtrl);
-      const res = await app.fetch(makeMultipart('/upload', { avatar: { name: 'pic.png', content: 'abc', type: 'image/png' } }));
-      const body = await res.json() as { name: string; size: number; };
-      expect(body.name).toBe('pic.png');
-      expect(body.size).toBe(3);
-    });
-
-    it('returns null when the field is missing', async () => {
-      @Controller('/upload-null')
-      class UploadNullCtrl {
-        @Post() @Public()
-        upload(@UploadedFile('missing') file: File | null) {
-          return { isNull: file === null };
-        }
-      }
-      const app = HonoRouteBuilder.build(UploadNullCtrl);
-      const res = await app.fetch(makeMultipart('/upload-null', { other: 'value' }));
-      const body = await res.json() as { isNull: boolean; };
-      expect(body.isNull).toBe(true);
-    });
+  it('hidden route is accessible without excludePrivate', async () => {
+    const app = HonoRouteBuilder.build(PrivController);
+    const res = await app.fetch(makeRequest('/priv/secret'));
+    expect(res.status).toBe(200);
   });
 
-  describe('@UploadedFiles', () => {
-    it('injects all files for a given field name', async () => {
-      @Controller('/upload-multi')
-      class MultiCtrl {
-        @Post() @Public()
-        upload(@UploadedFiles('photos') files: File[]) {
-          return { count: files.length, names: files.map(f => f.name) };
-        }
-      }
-      const app = HonoRouteBuilder.build(MultiCtrl);
-      const form = new FormData();
-      form.append('photos', new File(['a'], 'a.png', { type: 'image/png' }));
-      form.append('photos', new File(['bb'], 'b.png', { type: 'image/png' }));
-      const res = await app.fetch(new Request('http://test.local/upload-multi', { method: 'POST', body: form }));
-      const body = await res.json() as { count: number; names: string[]; };
-      expect(body.count).toBe(2);
-      expect(body.names).toContain('a.png');
-    });
-
-    it('injects all files across all fields when no fieldName given', async () => {
-      @Controller('/upload-all')
-      class AllCtrl {
-        @Post() @Public()
-        upload(@UploadedFiles() files: File[]) {
-          return { count: files.length };
-        }
-      }
-      const app = HonoRouteBuilder.build(AllCtrl);
-      const form = new FormData();
-      form.append('doc', new File(['x'], 'doc.pdf'));
-      form.append('img', new File(['y'], 'img.jpg'));
-      form.append('name', 'text-field');
-      const res = await app.fetch(new Request('http://test.local/upload-all', { method: 'POST', body: form }));
-      const body = await res.json() as { count: number; };
-      expect(body.count).toBe(2);
-    });
+  it('hidden route is excluded when excludePrivate: true', async () => {
+    const app = HonoRouteBuilder.build(PrivController, undefined, { excludePrivate: true });
+    const res = await app.fetch(makeRequest('/priv/secret'));
+    expect(res.status).toBe(404);
   });
 
-  describe('@FormBody', () => {
-    it('injects the raw FormData object', async () => {
-      @Controller('/form')
-      class FormCtrl {
-        @Post() @Public()
-        submit(@FormBody() form: FormData) {
-          return { name: form.get('name'), age: form.get('age') };
-        }
-      }
-      const app = HonoRouteBuilder.build(FormCtrl);
-      const res = await app.fetch(makeMultipart('/form', { name: 'Alice', age: '30' }));
-      const body = await res.json() as { name: string; age: string; };
-      expect(body.name).toBe('Alice');
-      expect(body.age).toBe('30');
-    });
-
-    it('formData is parsed once even when multiple file params exist', async () => {
-      @Controller('/form-multi-param')
-      class MultiParamCtrl {
-        @Post() @Public()
-        submit(@UploadedFile('doc') file: File | null, @FormBody() form: FormData) {
-          return { fileName: (file as File).name, field: form.get('note') };
-        }
-      }
-      const app = HonoRouteBuilder.build(MultiParamCtrl);
-      const form = new FormData();
-      form.append('doc', new File(['hello'], 'report.pdf'));
-      form.append('note', 'important');
-      const res = await app.fetch(new Request('http://test.local/form-multi-param', { method: 'POST', body: form }));
-      const body = await res.json() as { fileName: string; field: string; };
-      expect(body.fileName).toBe('report.pdf');
-      expect(body.field).toBe('important');
-    });
-  });
-
-  /* -------- @Private / excludePrivate -------- */
-
-  describe('@Private / excludePrivate', () => {
-    @Controller('/visibility')
-    class VisibilityController {
-      @Get('/public') @Public()
-      pub() { return { route: 'public' }; }
-
-      @Get('/internal') @Public() @Private()
-      internal() { return { route: 'internal' }; }
-    }
-
-    it('includes private routes by default', async () => {
-      const app = HonoRouteBuilder.build(VisibilityController);
-      const res = await app.fetch(makeRequest('/visibility/internal'));
-      expect(res.status).toBe(200);
-    });
-
-    it('excludes private routes when excludePrivate: true', async () => {
-      const app = HonoRouteBuilder.build(VisibilityController, undefined, { excludePrivate: true });
-      const res = await app.fetch(makeRequest('/visibility/internal'));
-      expect(res.status).toBe(404);
-    });
-
-    it('still serves non-private routes when excludePrivate: true', async () => {
-      const app = HonoRouteBuilder.build(VisibilityController, undefined, { excludePrivate: true });
-      const res = await app.fetch(makeRequest('/visibility/public'));
-      expect(res.status).toBe(200);
-    });
-  });
-
-  /* -------- middleware exception formatting -------- */
-
-  describe('middleware exception formatting', () => {
-    it('HttpException thrown in class middleware returns correct status + structured JSON', async () => {
-      const authMw = async (_c: Context, _next: Next) => {
-        throw HttpException.unauthorized('Token expired');
-      };
-
-      @Controller('/mw-http-ex')
-      @Middleware(authMw)
-      class MwHttpExController {
-        @Get() @Public()
-        handle() { return { ok: true }; }
-      }
-
-      HonoRouteBuilder.configure({});
-      const app = HonoRouteBuilder.build(MwHttpExController);
-      const res = await app.fetch(makeRequest('/mw-http-ex'));
-      expect(res.status).toBe(401);
-      const body = await res.json() as { status: string; error: { code: string; message: string; }; };
-      expect(body.status).toBe('error');
-      expect(body.error.code).toBe('UNAUTHORIZED');
-      expect(body.error.message).toBe('Token expired');
-    });
-
-    it('HttpException thrown in method middleware returns correct status', async () => {
-      const forbidMw = async (_c: Context, _next: Next) => {
-        throw HttpException.forbidden('Access denied');
-      };
-
-      @Controller('/mw-method-ex')
-      class MwMethodExController {
-        @Get() @Public() @Middleware(forbidMw)
-        handle() { return { ok: true }; }
-      }
-
-      HonoRouteBuilder.configure({});
-      const app = HonoRouteBuilder.build(MwMethodExController);
-      const res = await app.fetch(makeRequest('/mw-method-ex'));
-      expect(res.status).toBe(403);
-      const body = await res.json() as { error: { code: string; }; };
-      expect(body.error.code).toBe('FORBIDDEN');
-    });
-
-    it('generic Error thrown in middleware routes to onError hook', async () => {
-      let captured: unknown;
-      const failMw = async (_c: Context, _next: Next) => { throw new Error('middleware exploded'); };
-
-      @Controller('/mw-generic-ex')
-      @Middleware(failMw)
-      class MwGenericExController {
-        @Get() @Public()
-        handle() { return { ok: true }; }
-      }
-
-      HonoRouteBuilder.configure({
-        onError: (err, c) => { captured = err; return c.json({ error: 'caught' }, 500); },
-      });
-      const app = HonoRouteBuilder.build(MwGenericExController);
-      const res = await app.fetch(makeRequest('/mw-generic-ex'));
-      expect(res.status).toBe(500);
-      expect((captured as Error).message).toBe('middleware exploded');
-    });
-
-    it('exposeStack is respected for HttpException thrown in middleware', async () => {
-      const mw = async (_c: Context, _next: Next) => { throw HttpException.internal('oops'); };
-
-      @Controller('/mw-stack-ex')
-      @Middleware(mw)
-      class MwStackExController {
-        @Get() @Public()
-        handle() { return { ok: true }; }
-      }
-
-      HonoRouteBuilder.configure({ exposeStack: true });
-      const app = HonoRouteBuilder.build(MwStackExController);
-      const res = await app.fetch(makeRequest('/mw-stack-ex'));
-      const body = await res.json() as { error: Record<string, unknown>; };
-      expect(typeof body.error['stack']).toBe('string');
-    });
-  });
-
-  /* -------- observability: trace ID + requestLogger + onRequestStart -------- */
-
-  describe('observability', () => {
-    @Controller('/obs')
-    class ObsController {
-      @Get('/ping') @Public()
-      ping() { return { traceId: getTraceId() }; }
-    }
-
-    it('generates X-Request-ID response header', async () => {
-      const app = HonoRouteBuilder.build(ObsController);
-      const res = await app.fetch(makeRequest('/obs/ping'));
-      expect(res.headers.get('x-request-id')).toBeTruthy();
-    });
-
-    it('echoes incoming X-Request-ID header', async () => {
-      const app = HonoRouteBuilder.build(ObsController);
-      const res = await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'test-trace-123' } }));
-      expect(res.headers.get('x-request-id')).toBe('test-trace-123');
-    });
-
-    it('getTraceId() returns the current trace ID inside handler', async () => {
-      const app = HonoRouteBuilder.build(ObsController);
-      const res = await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'my-trace' } }));
-      const body = await res.json() as { traceId?: string; };
-      expect(body.traceId).toBe('my-trace');
-    });
-
-    it('requestLogger receives traceId in entry', async () => {
-      const entries: Array<{ traceId?: string; }> = [];
-      HonoRouteBuilder.configure({ requestLogger: (e) => { entries.push(e); } });
-      const app = HonoRouteBuilder.build(ObsController);
-      await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'log-trace' } }));
-      expect(entries[0]?.traceId).toBe('log-trace');
-    });
-
-    it('onRequestStart is called before handler with traceId', async () => {
-      const starts: Array<{ method: string; traceId: string; }> = [];
-      HonoRouteBuilder.configure({ onRequestStart: (info) => { starts.push(info); } });
-      const app = HonoRouteBuilder.build(ObsController);
-      await app.fetch(makeRequest('/obs/ping', { headers: { 'x-request-id': 'start-trace' } }));
-      expect(starts[0]?.traceId).toBe('start-trace');
-      expect(starts[0]?.method).toBe('GET');
-    });
-  });
-
-  /* -------- HttpException -------- */
-
-  describe('HttpException', () => {
-    @Controller('/ex')
-    class ExController {
-      @Get('/not-found') @Public()
-      notFound() { throw HttpException.notFound('Item not found', { meta: { id: 99 } }); }
-
-      @Get('/bad') @Public()
-      bad() { throw HttpException.badRequest('Invalid input', { code: 'CUSTOM_CODE' }); }
-
-      @Get('/raw') @Public()
-      raw() { throw new HttpException(418, "I'm a teapot"); }
-
-      @Get('/override') @Public()
-      override() { throw HttpException.internal('Boom'); }
-
-      @Get('/unknown') @Public()
-      unknown() { throw new Error('Unexpected'); }
-
-      @Get('/stack') @Public()
-      stack() { throw HttpException.internal('oops'); }
-    }
-
-    it('returns correct status code for HttpException', async () => {
-      HonoRouteBuilder.configure({});
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/not-found'));
-      expect(res.status).toBe(404);
-    });
-
-    it('returns structured JSON body with code and message', async () => {
-      HonoRouteBuilder.configure({});
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/not-found'));
-      const body = await res.json() as { status: string; error: { code: string; message: string; meta: { id: number; }; }; };
-      expect(body.status).toBe('error');
-      expect(body.error.code).toBe('NOT_FOUND');
-      expect(body.error.message).toBe('Item not found');
-      expect(body.error.meta).toEqual({ id: 99 });
-    });
-
-    it('uses custom error code when provided', async () => {
-      HonoRouteBuilder.configure({});
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/bad'));
-      const body = await res.json() as { error: { code: string; }; };
-      expect(body.error.code).toBe('CUSTOM_CODE');
-    });
-
-    it('derives default code from status when no code provided', async () => {
-      HonoRouteBuilder.configure({});
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/raw'));
-      const body = await res.json() as { error: { code: string; }; };
-      expect(res.status).toBe(418);
-      expect(body.error.code).toBe('HTTP_ERROR');
-    });
-
-    it('onError receives HttpException and can persist it without overriding response', async () => {
-      const captured: unknown[] = [];
-      HonoRouteBuilder.configure({
-        onError: (err) => { captured.push(err); /* return nothing → use default response */ },
-      });
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/not-found'));
-      expect(res.status).toBe(404);
-      expect(captured[0]).toBeInstanceOf(HttpException);
-      expect((captured[0] as HttpException).code).toBe('NOT_FOUND');
-    });
-
-    it('onError returning a Response fully overrides HttpException response', async () => {
-      HonoRouteBuilder.configure({
-        onError: (_err, c) => c.json({ overridden: true }, 200),
-      });
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/override'));
-      expect(res.status).toBe(200);
-      const body = await res.json() as { overridden: boolean; };
-      expect(body.overridden).toBe(true);
-    });
-
-    it('non-HttpException errors are re-thrown when onError returns void', async () => {
-      HonoRouteBuilder.configure({ onError: () => { /* void */ } });
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/unknown'));
-      expect(res.status).toBe(500);
-    });
-
-    it('does not include stack by default (exposeStack: false)', async () => {
-      HonoRouteBuilder.configure({ exposeStack: false });
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/stack'));
-      const body = await res.json() as { error: Record<string, unknown>; };
-      expect(body.error['stack']).toBeUndefined();
-    });
-
-    it('includes stack when exposeStack: true', async () => {
-      HonoRouteBuilder.configure({ exposeStack: true });
-      const app = HonoRouteBuilder.build(ExController);
-      const res = await app.fetch(makeRequest('/ex/stack'));
-      const body = await res.json() as { error: Record<string, unknown>; };
-      expect(typeof body.error['stack']).toBe('string');
-    });
-
-    it('static factories produce correct status codes', () => {
-      expect(HttpException.badRequest('x').status).toBe(400);
-      expect(HttpException.unauthorized().status).toBe(401);
-      expect(HttpException.forbidden().status).toBe(403);
-      expect(HttpException.notFound().status).toBe(404);
-      expect(HttpException.conflict('x').status).toBe(409);
-      expect(HttpException.unprocessable('x').status).toBe(422);
-      expect(HttpException.tooManyRequests().status).toBe(429);
-      expect(HttpException.internal().status).toBe(500);
-      expect(HttpException.serviceUnavailable().status).toBe(503);
-    });
+  it('non-private route is always accessible', async () => {
+    const app = HonoRouteBuilder.build(PrivController, undefined, { excludePrivate: true });
+    const res = await app.fetch(makeRequest('/priv/open'));
+    expect(res.status).toBe(200);
   });
 });

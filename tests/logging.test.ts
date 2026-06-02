@@ -1,20 +1,18 @@
-import 'reflect-metadata';
 import { describe, it, expect, beforeEach } from 'bun:test';
 import {
   Controller,
   Get,
   Public,
-  Ip,
-  Device,
-  UserAgent,
   HonoRouteBuilder,
   container,
 } from '../src';
 import {
   extractIp,
   detectDevice,
+  extractUserAgent,
 } from '../src';
 import type { RequestLogEntry } from '../src';
+import type { Context } from 'hono';
 
 /* ================= HELPERS ================= */
 
@@ -35,12 +33,13 @@ function makeRequest(
 class LogController {
   @Get('/info')
   @Public()
-  info(
-    @Ip() ip: string,
-    @Device() device: string,
-    @UserAgent() ua: string
-  ) {
-    return { ip, device, ua };
+  info(c: Context) {
+    const ua = extractUserAgent(c);
+    return {
+      ip: extractIp(c),
+      device: detectDevice(ua),
+      ua,
+    };
   }
 }
 
@@ -110,27 +109,27 @@ describe('extractIp', () => {
   });
 });
 
-describe('@Ip / @Device / @UserAgent param decorators', () => {
+describe('handler reads ip/device/ua from Context', () => {
   beforeEach(() => {
     HonoRouteBuilder.configure({});
     container.clear();
   });
 
-  it('injects IP from X-Forwarded-For', async () => {
+  it('reads IP from X-Forwarded-For', async () => {
     const app = HonoRouteBuilder.build(LogController);
     const res = await app.fetch(makeRequest('/log-test/info', { 'X-Forwarded-For': '99.1.2.3' }));
     const body = await res.json() as { ip: string };
     expect(body.ip).toBe('99.1.2.3');
   });
 
-  it('injects device type', async () => {
+  it('detects device type from User-Agent', async () => {
     const app = HonoRouteBuilder.build(LogController);
     const res = await app.fetch(makeRequest('/log-test/info'));
     const body = await res.json() as { device: string };
     expect(body.device).toBe('mobile');
   });
 
-  it('injects user-agent string', async () => {
+  it('reads user-agent string', async () => {
     const app = HonoRouteBuilder.build(LogController);
     const res = await app.fetch(makeRequest('/log-test/info'));
     const body = await res.json() as { ua: string };

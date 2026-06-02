@@ -1,6 +1,4 @@
-import 'reflect-metadata';
 import { describe, it, expect } from 'bun:test';
-import { z } from 'zod';
 import {
   Controller,
   Get,
@@ -9,9 +7,6 @@ import {
   Delete,
   Sse,
   WebSocket,
-  Body,
-  Param,
-  Query,
   Public,
   RequireAuth,
   RequireRole,
@@ -21,9 +16,6 @@ import { OpenAPIGenerator } from '../src';
 
 /* ================= CONTROLLERS ================= */
 
-const CreateItemSchema = z.object({ name: z.string().min(1), price: z.number() });
-const ItemQuerySchema = z.object({ search: z.string().optional(), page: z.number().optional() });
-
 @Controller('/items')
 @ApiTags('Items')
 class ItemController {
@@ -31,38 +23,38 @@ class ItemController {
   @Public()
   @ApiDoc({ summary: 'List items', description: 'Returns all items' })
   @ApiResponse(200, 'Success')
-  list(@Query(ItemQuerySchema) _q: unknown) {}
+  list() { }
 
   @Get('/:id')
   @Public()
   @ApiDoc({ summary: 'Get item' })
-  getOne(@Param('id') _id: string) {}
+  getOne() { }
 
   @Post()
   @RequireAuth()
   @ApiDoc({ summary: 'Create item' })
   @ApiResponse(201, 'Created')
-  create(@Body(CreateItemSchema) _body: unknown) {}
+  create() { }
 
   @Put('/:id')
   @RequireRole('admin')
-  update(@Param('id') _id: string, @Body(CreateItemSchema) _body: unknown) {}
+  update() { }
 
   @Delete('/:id')
   @RequireAuth()
   @ApiDeprecated()
-  remove(@Param('id') _id: string) {}
+  remove() { }
 }
 
 @Controller('/events')
 class StreamController {
   @Sse('/feed')
   @Public()
-  feed() {}
+  feed() { }
 
   @WebSocket('/chat')
   @Public()
-  chat() {}
+  chat() { }
 }
 
 /* ================= HELPERS ================= */
@@ -96,7 +88,7 @@ describe('OpenAPIGenerator.generate', () => {
     });
 
     it('skips controller without @Controller decorator', () => {
-      class Bare {}
+      class Bare { }
       const spec = generate(Bare as never);
       expect(Object.keys(spec['paths'] as object)).toHaveLength(0);
     });
@@ -172,25 +164,9 @@ describe('OpenAPIGenerator.generate', () => {
       expect(id?.['required']).toBe(true);
     });
 
-    it('expands @Query(schema) with object schema into individual params', () => {
-      const params = op(generate(ItemController), '/items', 'get')['parameters'] as unknown[];
-      const names = params?.map((p: unknown) => (p as Record<string, string>)['name']) ?? [];
-      expect(names).toContain('search');
-      expect(names).toContain('page');
-    });
-  });
-
-  describe('requestBody', () => {
-    it('generates requestBody from @Body schema', () => {
-      const rb = op(generate(ItemController), '/items', 'post')['requestBody'] as Record<string, unknown>;
-      expect(rb).toBeDefined();
-      expect(rb['required']).toBe(true);
-      const content = rb['content'] as Record<string, { schema: { properties: Record<string, unknown> } }>;
-      expect(content['application/json']?.['schema']?.['properties']?.['name']).toBeDefined();
-    });
-
-    it('no requestBody for GET', () => {
-      expect(op(generate(ItemController), '/items/{id}', 'get')['requestBody']).toBeUndefined();
+    it('no path params for /items', () => {
+      const params = op(generate(ItemController), '/items', 'get')['parameters'] as unknown[] | undefined;
+      expect(params).toBeUndefined();
     });
   });
 
@@ -198,11 +174,6 @@ describe('OpenAPIGenerator.generate', () => {
     it('uses @ApiResponse when provided', () => {
       const responses = op(generate(ItemController), '/items', 'get')['responses'] as Record<string, unknown>;
       expect('200' in responses).toBe(true);
-    });
-
-    it('adds 400 when requestBody or query schema present', () => {
-      const responses = op(generate(ItemController), '/items', 'post')['responses'] as Record<string, unknown>;
-      expect('400' in responses).toBe(true);
     });
 
     it('adds 401/403 for guarded routes', () => {
@@ -244,7 +215,7 @@ describe('OpenAPIGenerator.generate', () => {
     it('omits components when no auth routes', () => {
       @Controller('/open')
       class OpenController {
-        @Get() @Public() list() {}
+        @Get() @Public() list() { }
       }
       const spec = generate(OpenController);
       expect(spec['components']).toBeUndefined();

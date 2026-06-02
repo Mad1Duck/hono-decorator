@@ -9,10 +9,7 @@
 
     "types": ["bun-types"],
 
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-
-    "strict": true,
+"strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,

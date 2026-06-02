@@ -1,6 +1,86 @@
 # Changelog
 
-## [1.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v0.2.6...v1.0.0) (2026-06-01)
+## [1.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v0.2.6...v1.0.0) (2026-06-02)
+
+> **Major release** — migrated to TC39 Stage 3 decorators. No tsconfig flags, no `reflect-metadata`. See breaking changes below.
+
+### Breaking Changes
+
+#### TC39 Stage 3 decorators
+
+**No tsconfig flags required.** Remove `experimentalDecorators` and `emitDecoratorMetadata` from your `tsconfig.json`.
+
+**`reflect-metadata` removed** — uninstall it, remove any `import 'reflect-metadata'`.
+
+**Parameter decorators replaced by Context helper functions.** `@Body`, `@Query`, `@Param`, etc. are now typed helper functions called inside the handler with the same names:
+
+```ts
+// Before
+@Post()
+async create(@Body(schema) body: CreateDto, @Param('id') id: string) { ... }
+
+// After — same names, add c as first argument
+@Post()
+async create(c: Context) {
+  const body = await Body(c, schema);  // fully typed: z.infer<typeof schema>
+  const id   = Param(c, 'id');
+}
+```
+
+Full migration map:
+
+| Before | After |
+|---|---|
+| `@Body(schema)` | `await Body(c, schema)` |
+| `@Param('id')` | `Param(c, 'id')` |
+| `@Query()` | `Query(c)` |
+| `@Query(schema)` | `await Query(c, schema)` |
+| `@Headers('x-tok')` | `Headers(c, 'x-tok')` |
+| `@User()` | `User(c)` / `User<T>(c)` |
+| `@Ip()` | `Ip(c)` |
+| `@Device()` | `Device(c)` |
+| `@UserAgent()` | `UserAgent(c)` |
+| `@Cookie('name')` | `Cookie(c, 'name')` |
+| `@Cookies()` | `Cookies(c)` |
+| `@UploadedFile('f')` | `await UploadedFile(c, 'f')` |
+| `@UploadedFiles('f')` | `await UploadedFiles(c, 'f')` |
+| `@FormBody()` | `await FormBody(c)` |
+| `@Req()` | `Req(c)` |
+| `@Ctx()` / `@Res()` | `Ctx(c)` |
+
+**SSE handlers** now receive `(c: Context, stream: SSEStreamingApi)` as positional arguments — no `@SseStream()` needed.
+
+**`@Injectable` requires explicit dependency tokens:**
+
+```ts
+// Before
+@Injectable()
+class UserService { constructor(private db: Database) {} }
+
+// After
+@Injectable([Database])
+class UserService { constructor(private db: Database) {} }
+```
+
+**`@Inject(token)` parameter decorator removed.** Pass the token in the `@Injectable` array instead:
+
+```ts
+// Before
+@Injectable()
+class UserService { constructor(@Inject(DB) private db: AppDb) {} }
+
+// After
+@Injectable([DB])
+class UserService { constructor(private db: AppDb) {} }
+```
+
+**`strictValidation` config option removed** — was only meaningful alongside `@Body()` without a schema.
+
+### Fixed
+
+- Bundle size: 112 KB → 52 KB (no bundled `reflect-metadata`)
+
+---
 
 ## [0.2.6](https://github.com/Mad1Duck/hono-decorator/compare/v0.2.5...v0.2.6) (2026-05-08)
 
@@ -23,80 +103,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+---
 
-- `reflect-metadata` is now bundled inline into the library output — consumers no longer need to install or import it manually. Previously it was marked as `external` in the build config, which caused resolution failures with pnpm and strict bundlers.
+## Notes on v0.x history
 
-### Added
+> Content from v0.2.x entries has been consolidated — see git log for full details.
 
-#### Error Handling
-- `HttpException` — structured HTTP error class with `status`, `code`, `message`, and optional `meta` payload
-  - Static factories: `HttpException.badRequest()`, `.unauthorized()`, `.forbidden()`, `.notFound()`, `.conflict()`, `.unprocessable()`, `.tooManyRequests()`, `.internal()`, `.serviceUnavailable()`
-  - Automatically handled by the route builder — returns correct HTTP status code + consistent JSON: `{ status, error: { code, message, meta? } }`
-  - `onError` hook is called **before** the default response is sent — use it to persist errors to a database or external service without needing to handle the HTTP serialization yourself
-- `exposeStack` option in `HonoRouteBuilder.configure()` — controls stack trace exposure in `HttpException` responses
-  - `false` (default) — stack never exposed (production-safe)
-  - `true` — stack always included in response body
-  - `'development'` — stack included only when `NODE_ENV !== 'production'`
-- `ErrorHandler` now returns `Response | void` instead of `Response` — returning `void` from `onError` falls through to default handling (auto-format `HttpException`, re-throw others), returning a `Response` fully overrides the reply
+---
 
-#### Observability
-- **Trace ID / Correlation ID** — every request automatically gets a `traceId` from the `X-Request-ID` header (or a generated UUID if absent). The ID is echoed back as `X-Request-ID` on the response.
-- `getTraceId()` — returns the active trace ID from `AsyncLocalStorage`; callable from anywhere in the call chain (services, repos, loggers) without passing it explicitly.
-- `runWithTraceId(id, fn)` — exported for running code outside the route builder within a trace context.
-- `requestLogger` now receives `traceId` in every `RequestLogEntry`.
-- `onRequestStart` hook — called before middleware and guards on every request with `{ method, path, traceId, ip, userAgent }`. Use this to start an OpenTelemetry span or attach context to a logger.
-- `requestLogger` now called for **SSE** connections (on stream open, status 200) and **WebSocket** upgrades (status 101) — previously these were not logged.
-
-#### Concurrency safety
-- `@Memoize({ scope: 'request' })` — per-request cache using `AsyncLocalStorage`; isolates results between concurrent requests. Use on singletons that return user-specific data. Default scope remains `'global'` (shared cache, suitable for config/DB lookups).
-- `runWithMemoScope(fn)` — initializes the memoize request scope; called automatically by `HonoRouteBuilder` for every HTTP handler.
-- `@Stateless()` — no-op marker decorator for `@Singleton()` classes that hold no mutable per-request state. Documents intent and can be enforced by future linting tools.
-
-### Changed
-
-#### `@Stateless()` — now enforces immutability at runtime
-- Previously a no-op marker with no enforcement
-- Resolved `@Stateless @Singleton` instances are now wrapped in a `Proxy` that **throws** if any property is written to after the constructor finishes
-- Reading is always allowed; writes throw `[hono-forge] @Stateless singleton '...' attempted to mutate property '...'`
-- Does not affect manually registered instances (`registerInstance` / `registerSingleton`)
-
-#### `@Throttle` — per-instance state instead of shared closure
-- `lastCall` was a decorator-factory closure variable, shared across **all instances** of a class decorated with `@Throttle`
-- Replaced with `WeakMap<object, number>` keyed by `this` — each class instance now has its own throttle window
-- **Transient classes**: each resolved instance is independent (correct) 
-- **Singletons**: all requests share the throttle window (intended — global method rate limiting)
-
-#### Middleware exception formatting
-- Errors thrown inside class-level or method-level `@Middleware` functions previously bypassed the `onError` hook and fell through to Hono's default plain-text 500 handler
-- All user-supplied middlewares (class, method, rate-limit) are now wrapped in `wrapMiddleware`, which routes exceptions through the same `ZodError → 400`, `HttpException → correct status`, `onError hook`, `re-throw` pipeline used by the HTTP handler
-- Guard middleware was already handled separately and is unchanged
-
-#### AsyncLocalStorage consolidation
-- **3 separate `AsyncLocalStorage` instances** (trace, memoize, DI scope) merged into a **single `AsyncLocalStorage<RequestContext>`** — reduces per-request ALS overhead from 3× `.run()` calls to 1×
-- Improves throughput in high-concurrency and edge runtime scenarios (Cloudflare Workers, Vercel Edge)
-- All public APIs remain unchanged: `getTraceId()`, `runWithTraceId()`, `runWithMemoScope()`, `container.runInScope()` still work identically
-- New internal `src/core/request-context.ts` holds the unified context; not part of the public API
+## [0.1.3] - 2026-05-05
 
 ### Added
-
-#### Validation enforcement
-- `strictValidation` option in `HonoRouteBuilder.configure()` — checks mutation routes (POST, PUT, PATCH) for `@Body()` usage without a Zod schema at `build()` time
-  - `'warn'` (default) — logs `console.warn` at build time
-  - `'error'` — throws at build time; recommended for CI / production builds
-  - `'off'` — disables the check
-- `@FormBody()` is excluded from the check (multipart form data cannot carry a Zod schema)
-
-#### DI — Request-scoped instances
-- `@RequestScoped()` — marks a class as request-scoped; a fresh instance is created per request and shared within it
-- `container.runInScope(fn)` — runs `fn` inside a new request scope; `onDestroy` is called on all scoped instances in the `finally` block (even on error)
-- `HonoRouteBuilder` automatically wraps every HTTP handler in `container.runInScope()` — no manual setup needed
-
-#### DI — Lifecycle hooks
-- `OnInit` interface — `onInit(): Promise<void> | void`; called by `container.boot()` for singletons
-- `OnDestroy` interface — `onDestroy(): Promise<void> | void`; called by `container.shutdown()` for singletons, automatically for request-scoped instances
-- `container.boot()` — initializes all registered singleton instances that implement `OnInit` (call at app startup, before `app.listen()`)
-- `container.shutdown()` — destroys all singletons in reverse registration order (call in SIGTERM/SIGINT handler)
+- `@Throttle(ms)` — method decorator that limits call frequency per instance
+- `@Memoize(opts?)` — method decorator with optional TTL caching
+- `@ValidateResult(schema)` — validates method return value against a Zod schema
 
 ---
 

@@ -7,13 +7,13 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 ## Features
 
 - **Controller routing** — `@Controller`, `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Head`, `@Options`, `@All`
-- **Dependency injection** — `@Injectable`, `@Singleton`, `@Inject`, circular dependency detection
-- **Parameter decorators** — `@Body`, `@Query`, `@Param`, `@Headers`, `@User`, `@Ip`, `@Device`, `@UserAgent` with optional Zod validation
+- **Context helpers** — `Body`, `Param`, `Query`, `Headers`, `User`, `Ip`, `Device`, `Cookie`, `UploadedFile` and more — typed functions called inside the handler with `c` as first arg
+- **Dependency injection** — `@Injectable([deps])`, `@Singleton`, `@RequestScoped`, circular dependency detection, lifecycle hooks
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
 - **Rate limiting** — `@RateLimit` with pluggable factory
 - **Middleware** — `@Middleware` / `@Use` at class or method level; built-in `@Cors`, `@Compress`, `@SecureHeaders`, `@PrettyJson`
 - **Auto-discovery** — `discoverControllers` (Bun) and `fromModules` (any bundler)
-- **SSE** — `@Sse`, `@SseStream` with streaming API
+- **SSE** — `@Sse` — handler receives `(c: Context, stream: SSEStreamingApi)`
 - **WebSocket** — `@WebSocket` with pluggable upgrader
 - **Channels** — pub/sub for SSE and WS; in-memory default, pluggable to Redis
 - **Request logging** — pluggable `requestLogger` with IP, device, UA, duration
@@ -28,38 +28,29 @@ npm install hono-forge hono zod
 bun add hono-forge hono zod
 ```
 
-> `reflect-metadata` is bundled as a direct dependency — no separate install needed.
-
 ### TypeScript setup
+
+No `tsconfig.json` flags required. hono-forge uses **TC39 Stage 3 decorators** — the standard decorator syntax supported natively by TypeScript 5.0+ and Bun.
 
 ```json
 {
   "compilerOptions": {
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    "target": "ESNext"
   }
 }
 ```
 
-Import `reflect-metadata` once at your app entry point:
-
-```ts
-import 'reflect-metadata';
-```
-
-> **Note:** This package uses **legacy TypeScript decorators** (`experimentalDecorators: true`), not the TC39 Stage 3 decorators. They are not compatible.
-
-> **Bundler note:** `emitDecoratorMetadata` requires [`@swc/core`](https://swc.rs/) with esbuild/Vite. With `tsc` or `ts-node` it works out of the box.
+No `reflect-metadata` import. No `experimentalDecorators`. Just install and use.
 
 ---
 
 ## Quick start
 
 ```ts
-import 'reflect-metadata';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import {
-  Controller, Get, Post, Body, Param,
+  Controller, Get, Post,
   Injectable, HonoRouteBuilder,
 } from 'hono-forge';
 import { z } from 'zod';
@@ -73,6 +64,7 @@ class UserService {
 }
 
 @Controller('/users')
+@Injectable([UserService])
 class UserController {
   constructor(private userService: UserService) {}
 
@@ -80,18 +72,21 @@ class UserController {
   list() { return this.userService.getAll(); }
 
   @Post()
-  create(@Body(CreateUserSchema) body: z.infer<typeof CreateUserSchema>) {
+  async create(c: Context) {
+    const body = await CreateUserSchema.parseAsync(await c.req.json());
     return this.userService.create(body);
   }
 
   @Get('/:id')
-  getOne(@Param('id') id: string) { return { id }; }
+  getOne(c: Context) { return { id: c.req.param('id') }; }
 }
 
 const app = new Hono();
 app.route('/', HonoRouteBuilder.build(UserController));
 export default app;
 ```
+
+> **Handlers receive `c: Context` directly.** Route params, query strings, request body, and headers are all accessed via Hono's standard `c.req` API. This keeps handlers simple and fully typed without any magic.
 
 ---
 
@@ -152,17 +147,19 @@ Both functions only pick up classes decorated with `@Controller` — other expor
 
 ## Dependency injection
 
-### `@Injectable()`
+### `@Injectable(tokens?)`
 
-Marks a class as injectable. Required for constructor injection.
+Marks a class as injectable. Pass an array of constructor dependencies as explicit tokens:
 
 ```ts
 @Injectable()
 class EmailService { send(to: string) { /* ... */ } }
 
-@Injectable()
+@Injectable([EmailService])
 class UserService { constructor(private email: EmailService) {} }
 ```
+
+For zero dependencies, `@Injectable()` or `@Injectable([])` is equivalent.
 
 ### `@Singleton()`
 
@@ -174,17 +171,19 @@ Same instance returned on every `container.resolve()` call.
 class Database { constructor() { this.conn = connect(process.env.DB_URL); } }
 ```
 
-### `@Inject(token)`
+### Injecting by symbol or string token
 
-Inject by string or symbol token — useful for interfaces or values.
+Pass the token directly in the `@Injectable` array:
 
 ```ts
 const LOGGER = Symbol('LOGGER');
 container.registerSingleton(LOGGER, new PinoLogger());
 
-@Injectable()
-class UserService { constructor(@Inject(LOGGER) private logger: Logger) {} }
+@Injectable([LOGGER])
+class UserService { constructor(private logger: Logger) {} }
 ```
+
+The array index maps to the constructor parameter position.
 
 ### Manual registration
 
@@ -211,9 +210,9 @@ const client = postgres(process.env.DATABASE_URL!);
 container.registerInstance(DB, drizzle(client));
 
 // 3. Inject into any service
-@Injectable()
+@Injectable([DB])
 export class UserRepo {
-  constructor(@Inject(DB) private db: AppDb) {}
+  constructor(private db: AppDb) {}
 
   findAll() {
     return this.db.select().from(users);
@@ -328,28 +327,31 @@ export const UserSchemas = defineSchemas(
 // UserSchemas.update  — all fields optional (PATCH body)
 ```
 
-Use directly with parameter decorators and OpenAPI:
+Use with Context helpers and OpenAPI:
 
 ```ts
 @Controller('/users')
+@Injectable([UserRepo])
 class UserController {
+  constructor(private repo: UserRepo) {}
+
   @Post()
-  create(@ValidatedBody(UserSchemas.insert) body: typeof UserSchemas.insert._output) {
+  async create(c: Context) {
+    const body = await ValidatedBody(c, UserSchemas.insert);
     return this.repo.create(body);
   }
 
   @Patch('/:id')
-  update(
-    @Param('id') id: string,
-    @ValidatedBody(UserSchemas.update) body: typeof UserSchemas.update._output,
-  ) {
+  async update(c: Context) {
+    const id   = Param(c, 'id');
+    const body = await ValidatedBody(c, UserSchemas.update);
     return this.repo.update(id, body);
   }
 
   @Get('/:id')
-  @ApiResponse(200, { schema: UserSchemas.select })
-  getOne(@Param('id') id: string) {
-    return this.repo.findById(id);
+  @ApiResponse(200, 'Success')
+  getOne(c: Context) {
+    return this.repo.findById(Param(c, 'id'));
   }
 }
 ```
@@ -475,151 +477,105 @@ app.route('/', HonoRouteBuilder.build(UserController, 'mobile'));
 
 ---
 
-## Parameter decorators
+## Context helpers
 
-| Decorator | Injects |
-|-----------|---------|
-| `@Body()` | `await c.req.json()` — full body |
-| `@Body('field')` | Single field extracted from body |
-| `@Query()` | `c.req.query()` — all query params as object |
-| `@Query('name')` | `c.req.query('name')` — individual query param |
-| `@Param(name)` | `c.req.param(name)` |
-| `@Headers(name)` | `c.req.header(name)` |
-| `@User()` | `c.get('user')` — set by guard |
-| `@Cookie('name')` | Individual cookie value by name |
-| `@Cookies()` | All cookies as `Record<string, string>` |
-| `@Ip()` | Real client IP (CF-Connecting-IP → X-Real-IP → X-Forwarded-For) |
-| `@Device()` | `'mobile' \| 'tablet' \| 'desktop' \| 'bot'` |
-| `@UserAgent()` | Raw `User-Agent` header string |
-| `@Req()` | Hono `HonoRequest` |
-| `@Ctx()` | Hono `Context` `c` — preferred over `@Res()` |
-| `@Res()` | Hono `Context` `c` — alias for `@Ctx()`, kept for compatibility |
-| `@SseStream()` | SSE stream (inside `@Sse` handlers) |
-| ~~`@Next()`~~ | **Deprecated** — always `undefined`; Hono has no Express-style next callback |
+hono-forge exports typed helper functions for common request data — same names as the old parameter decorators, now called inside the handler with `c` as the first argument.
+
+```ts
+import {
+  Body, Param, Query, Headers, User,
+  Ip, Device, UserAgent, Cookie, Cookies,
+  UploadedFile, UploadedFiles, FormBody,
+  Req, Ctx,
+} from 'hono-forge';
+import type { Context } from 'hono';
+import { z } from 'zod';
+
+const CreateSchema = z.object({ name: z.string().min(1) });
+
+@Post()
+async create(c: Context) {
+  const body = await Body(c, CreateSchema);  // validated + typed
+  return this.svc.create(body.name);
+}
+
+@Get('/:id')
+getOne(c: Context) {
+  const id    = Param(c, 'id');          // string
+  const token = Headers(c, 'x-token');  // string | undefined
+  const u     = User<MyUser>(c);        // c.get('user') as MyUser
+  return this.svc.findById(id);
+}
+
+@Get()
+async list(c: Context) {
+  const q = await Query(c, FilterSchema);  // validated query object
+  return this.svc.getAll(q);
+}
+```
+
+### Full reference
+
+| Helper | Returns | Notes |
+|---|---|---|
+| `await Body(c, schema)` | `z.infer<schema>` | Parse + validate body |
+| `await Body(c)` | `unknown` | Raw body, no validation |
+| `Param(c, 'id')` | `string` | Route param |
+| `Param(c)` | `Record<string, string>` | All route params |
+| `await Query(c, schema)` | `z.infer<schema>` | Validated query params |
+| `Query(c)` | `Record<string, string>` | All query params, no validation |
+| `Headers(c, 'x-tok')` | `string \| undefined` | Single header |
+| `Headers(c)` | `Record<string, string>` | All headers |
+| `User<T>(c)` | `T` | `c.get('user')` — set by guard |
+| `Ip(c)` | `string` | CF-Connecting-IP → X-Real-IP → X-Forwarded-For |
+| `Device(c)` | `'mobile' \| 'tablet' \| 'desktop' \| 'bot'` | From User-Agent |
+| `UserAgent(c)` | `string` | Raw User-Agent header |
+| `Cookie(c, 'name')` | `string \| undefined` | Single cookie |
+| `Cookies(c)` | `Record<string, string>` | All cookies |
+| `await UploadedFile(c, 'field')` | `File \| null` | Single file from multipart |
+| `await UploadedFiles(c, 'field?')` | `File[]` | Multiple files |
+| `await FormBody(c)` | `FormData` | Raw form data |
+| `Req(c)` | `HonoRequest` | Hono request object |
+| `Ctx(c)` / `Res(c)` | `Context` | Full context (for redirect, set-cookie, etc.) |
+
+### Validated shorthands
+
+`ValidatedBody`, `ValidatedQuery`, and `ValidatedParam` are aliases with identical behaviour:
+
+```ts
+const id = await ValidatedParam(c, 'id', z.string().uuid());
+```
+
+Invalid input throws `ZodError` → route builder returns `400 VALIDATION_ERROR` automatically.
 
 ### Cookies
 
 ```ts
 @Get('/profile')
 @RequireAuth()
-profile(
-  @Cookie('session') session: string,
-  @User() user: any,
-) {
+profile(c: Context) {
+  const session = Cookie(c, 'session');
+  const user    = User<MyUser>(c);
   return { session, user };
-}
-
-@Get('/debug')
-allCookies(@Cookies() cookies: Record<string, string>) {
-  return cookies;
-}
-```
-
-### Direct Context access with `@Ctx()`
-
-Use `@Ctx()` when you need the raw Hono `Context` — for setting cookies, redirecting, or accessing Hono-specific features not covered by other decorators:
-
-```ts
-import type { Context } from 'hono';
-
-@Get('/redirect')
-redirect(@Ctx() c: Context) {
-  return c.redirect('/new-path');
-}
-
-@Post('/login')
-async login(@Body(LoginSchema) body: any, @Ctx() c: Context) {
-  const token = await this.authService.login(body);
-  c.header('Set-Cookie', `token=${token}; HttpOnly; Path=/`);
-  return { ok: true };
-}
-```
-
-> `@Res()` is a kept alias for `@Ctx()` — both inject the Hono `Context`. Prefer `@Ctx()` for clarity since it accurately describes what is injected.
-
-### Individual field extraction
-
-Pass a string name to `@Body` or `@Query` to extract a single field:
-
-```ts
-@Get()
-list(
-  @Query('page') page: string,
-  @Query('limit') limit: string,
-) {
-  return this.repo.findAll({ page: Number(page), limit: Number(limit) });
-}
-
-@Post()
-async create(
-  @Body('name') name: string,
-  @Body('email') email: string,
-) {
-  return this.repo.create({ name, email });
-}
-```
-
-### With Zod validation
-
-```ts
-const Schema = z.object({ name: z.string(), age: z.number() });
-
-@Post()
-create(@Body(Schema) body: z.infer<typeof Schema>) {
-  // body is validated; returns 400 VALIDATION_ERROR if invalid
 }
 ```
 
 ### File uploads
 
-Use `@UploadedFile`, `@UploadedFiles`, or `@FormBody` on multipart/form-data routes.
-
 ```ts
 @Post('/avatar')
-uploadAvatar(@UploadedFile('avatar') file: File | null) {
+async uploadAvatar(c: Context) {
+  const file = await UploadedFile(c, 'avatar');
   if (!file) return c.json({ error: 'no file' }, 400);
-  return { name: file.name, size: file.size, type: file.type };
+  return { name: file.name, size: file.size };
 }
 
 @Post('/gallery')
-uploadMany(@UploadedFiles('photos') files: File[]) {
+async uploadMany(c: Context) {
+  const files = await UploadedFiles(c, 'photos');
   return files.map(f => ({ name: f.name, size: f.size }));
 }
-
-@Post('/submit')
-handleForm(@FormBody() form: FormData, @UploadedFile('doc') doc: File | null) {
-  const title = form.get('title') as string;
-  return { title, docName: doc?.name };
-}
 ```
-
-| Decorator | Returns | Notes |
-|-----------|---------|-------|
-| `@UploadedFile(fieldName)` | `File \| null` | Single file by field name |
-| `@UploadedFiles(fieldName?)` | `File[]` | Multiple files; omit field to get all files in the form |
-| `@FormBody()` | `FormData` | Raw form data object |
-
-`FormData` is parsed **once per request** even when multiple file decorators are used on the same handler.
-
-### `@ValidatedBody` / `@ValidatedQuery` / `@ValidatedParam`
-
-Type-safe aliases that carry the inferred Zod type so TypeScript can narrow the parameter without an explicit annotation:
-
-```ts
-const UserSchema = z.object({ name: z.string(), age: z.number() });
-const IdSchema   = z.string().uuid();
-
-@Post()
-create(@ValidatedBody(UserSchema) body: typeof UserSchema._output) { /* ... */ }
-
-@Get()
-list(@ValidatedQuery(z.object({ page: z.coerce.number() })) q: { page: number }) { /* ... */ }
-
-@Get('/:id')
-getOne(@ValidatedParam('id', IdSchema) id: string) { /* ... */ }
-```
-
-Behaves identically to `@Body` / `@Query` / `@Param` — invalid input returns `400 VALIDATION_ERROR`.
 
 ---
 
@@ -663,26 +619,26 @@ HonoRouteBuilder.configure({
 @Private()                                 // marks route as internal-only
 ```
 
-### Accessing authenticated user with `@User()`
+### Accessing authenticated user
 
-When using `@RequireAuth()`, the guard executor sets the user in the context. Use the `@User()` decorator to retrieve it in your handler:
+When using `@RequireAuth()`, the guard executor sets the user on the context. Read it with `User(c)` or directly via `c.get('user')`:
 
 ```ts
 @Get('/me')
 @RequireAuth()
-async me(@User() user: any) {
+async me(c: Context) {
+  const user = User<MyUser>(c);  // typed shorthand for c.get('user')
   return { address: user.address, roles: user.roles };
 }
 
 @Post('/users')
 @RequireAuth()
-async create(@User() user: any, @Body(CreateUserSchema) body: any) {
-  // user is authenticated; body is validated
+async create(c: Context) {
+  const user = User<MyUser>(c);
+  const body = await Body(c, CreateUserSchema);
   return this.userService.create(user.address, body);
 }
 ```
-
-**Important:** Do not try to access the Context directly (e.g., `c.get('user')`). Always use the `@User()` decorator — it's the only supported way to access the authenticated user in decorated methods.
 
 ### `@Private`
 
@@ -723,7 +679,10 @@ HonoRouteBuilder.configure({
 
 @Post('/login')
 @RateLimit({ max: 5, windowMs: 60_000, message: 'Too many attempts' })
-login(@Body() body: LoginDto) { /* ... */ }
+async login(c: Context) {
+  const body = await Body(c) as LoginDto;
+  /* ... */
+}
 ```
 
 ---
@@ -746,7 +705,7 @@ class ApiController {
   list() { /* ... */ }
 
   @Post()
-  create(@Body() body: unknown) { /* ... */ }
+  async create(c: Context) { const body = await Body(c); /* ... */ }
 }
 ```
 
@@ -811,16 +770,17 @@ All four can be used at class level (applies to every route) or method level (ap
 
 ## SSE (Server-Sent Events)
 
-`@Sse` registers a GET endpoint. The handler receives the stream via `@SseStream()` and writes events until the client disconnects.
+`@Sse` registers a GET endpoint. The handler receives `(c: Context, stream: SSEStreamingApi)` as positional arguments.
 
 ```ts
+import type { Context } from 'hono';
 import type { SSEStreamingApi } from 'hono/streaming';
 
 @Controller('/events')
 class NotificationController {
   @Sse('/feed')
   @Public()
-  async feed(@SseStream() stream: SSEStreamingApi) {
+  async feed(c: Context, stream: SSEStreamingApi) {
     await stream.writeSSE({ event: 'connected', data: 'ok' });
 
     // keep-alive ping every 30s
@@ -851,7 +811,8 @@ The handler returns WebSocket event callbacks:
 class ChatController {
   @WebSocket('/:room')
   @Public()
-  chat(@Param('room') room: string) {
+  chat(c: Context) {
+    const room = Param(c, 'room');
     return {
       onOpen(_event, ws) { console.log('connected to', room); },
       onMessage(event, ws) { ws.send(`Echo: ${event.data}`); },
@@ -890,10 +851,8 @@ import type { SSEStreamingApi } from 'hono/streaming';
 class EventController {
   @Sse('/user/:userId')
   @RequireAuth()
-  async userFeed(
-    @Param('userId') userId: string,
-    @SseStream() stream: SSEStreamingApi
-  ) {
+  async userFeed(c: Context, stream: SSEStreamingApi) {
+    const userId = Param(c, 'userId');
     const client = new SseChannelClient(userId, stream);
     await channels.subscribe(`user:${userId}`, client);
     stream.onAbort(() => channels.unsubscribe(`user:${userId}`, userId));
@@ -918,7 +877,8 @@ import { channels, WsChannelClient } from 'hono-forge';
 class ChatController {
   @WebSocket('/:room')
   @Public()
-  chat(@Param('room') room: string) {
+  chat(c: Context) {
+    const room = Param(c, 'room');
     return {
       onOpen: (_e, ws) => channels.subscribe(`room:${room}`, new WsChannelClient(ws.id, ws)),
       onMessage: (e) => channels.publish(`room:${room}`, 'message', { text: e.data }),
@@ -950,12 +910,12 @@ HonoRouteBuilder.configure({
 });
 ```
 
-`ip`, `device`, and `userAgent` are also available as parameter decorators:
+`ip`, `device`, and `userAgent` are available via Context helpers:
 
 ```ts
 @Get('/info')
-info(@Ip() ip: string, @Device() device: string, @UserAgent() ua: string) {
-  return { ip, device, ua };
+info(c: Context) {
+  return { ip: Ip(c), device: Device(c), ua: UserAgent(c) };
 }
 ```
 
@@ -975,8 +935,8 @@ Throw `HttpException` from anywhere in a handler or service — the route builde
 import { HttpException } from 'hono-forge';
 
 @Get('/:id')
-async getOne(@Param('id') id: string) {
-  const user = await this.repo.findById(id);
+async getOne(c: Context) {
+  const user = await this.repo.findById(Param(c, 'id'));
   if (!user) throw HttpException.notFound('User not found');
   return user;
 }
@@ -1190,7 +1150,7 @@ The transaction is propagated via `AsyncLocalStorage`, so any nested repository 
 ```ts
 import { useTransaction } from 'hono-forge';
 
-@Injectable()
+@Injectable([DB])
 class UserRepo {
   constructor(private db: DrizzleDb) {}
 
@@ -1200,7 +1160,7 @@ class UserRepo {
   }
 }
 
-@Injectable()
+@Injectable([DB, UserRepo])
 class AccountService {
   constructor(private db: DrizzleDb, private repo: UserRepo) {}
 
@@ -1227,11 +1187,11 @@ const prismaExecutor: TransactionExecutor<PrismaClient> =
 ## Full example
 
 ```ts
-import 'reflect-metadata';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import {
   Controller, Get, Post, Delete, Sse,
-  Body, Query, Param, User, Ctx, Cookie, Cookies, Ip, Device, SseStream,
+  Body, Param, User, Cookie, Ip, Device,
   RequireAuth, RequireRole, Public,
   Injectable, Singleton,
   HonoRouteBuilder, container,
@@ -1248,6 +1208,7 @@ class UserRepo {
 }
 
 @Controller('/users')
+@Injectable([UserRepo])
 class UserController {
   constructor(private repo: UserRepo) {}
 
@@ -1257,14 +1218,15 @@ class UserController {
 
   @Get('/:id')
   @RequireAuth()
-  getOne(@Param('id') id: string) { return this.repo.findById(id); }
+  getOne(c: Context) { return this.repo.findById(Param(c, 'id')); }
 }
 
 @Controller('/events')
 class EventController {
   @Sse('/user/:userId')
   @RequireAuth()
-  async userFeed(@Param('userId') userId: string, @SseStream() stream: SSEStreamingApi) {
+  async userFeed(c: Context, stream: SSEStreamingApi) {
+    const userId = Param(c, 'userId');
     const client = new SseChannelClient(userId, stream);
     await channels.subscribe(`user:${userId}`, client);
     stream.onAbort(() => channels.unsubscribe(`user:${userId}`, userId));

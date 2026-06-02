@@ -4,16 +4,12 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 
 import { METADATA_KEYS } from '../decorators/metadata';
-import type {
-  RouteMetadata,
-  ParamMetadata,
-  GuardMetadata,
-  OpenAPIMetadata,
-} from '../decorators/metadata';
+import type { RouteMetadata, GuardMetadata, OpenAPIMetadata } from '../decorators/metadata';
 
 /* ================= TYPES ================= */
 
 type Constructor = new (...args: unknown[]) => unknown;
+type ClassMeta = Record<symbol, unknown>;
 
 export interface OpenAPIInfo {
   title: string;
@@ -40,6 +36,10 @@ export interface OpenAPIMountOptions {
 
 /* ================= HELPERS ================= */
 
+function getMeta(target: Function): ClassMeta | null {
+  return (target as unknown as { [Symbol.metadata]?: ClassMeta })[Symbol.metadata] ?? null;
+}
+
 /** Convert Hono path params /:id → OpenAPI {id} */
 function honoPathToOpenAPI(path: string): string {
   return path.replace(/:([^/]+)/g, '{$1}');
@@ -50,14 +50,14 @@ function extractPathParamNames(path: string): string[] {
   return [...path.matchAll(/:([^/]+)/g)].map(m => m[1]!);
 }
 
-/** Convert a Zod schema to a plain JSON Schema object (strips the $schema key). */
+/** Convert a Zod schema to a plain JSON Schema object. */
 function zodToJsonSchema(schema: ZodType): Record<string, unknown> {
   const full = (z as any).toJSONSchema(schema) as Record<string, unknown>;
   const { $schema: _ignored, ...rest } = full;
   return rest;
 }
 
-/** Strip undefined values from an object (keeps JSON output clean). */
+/** Strip undefined values from an object. */
 function compact<T extends Record<string, unknown>>(obj: T): Partial<T> {
   return Object.fromEntries(
     Object.entries(obj).filter(([, v]) => v !== undefined)
@@ -69,6 +69,10 @@ function compact<T extends Record<string, unknown>>(obj: T): Partial<T> {
 export class OpenAPIGenerator {
   /**
    * Generate an OpenAPI 3.1 spec object from an array of decorated controller classes.
+   *
+   * Use @ApiDoc, @ApiResponse, @ApiTags, @ApiDeprecated on your handlers to enrich the spec.
+   * Path parameters are inferred from the route path pattern.
+   * Body/query parameters can be documented via @ApiDoc.
    *
    * @example
    * const spec = OpenAPIGenerator.generate([UserController, OrderController], {
@@ -84,29 +88,25 @@ export class OpenAPIGenerator {
     let needsBearerAuth = false;
 
     for (const ControllerClass of controllers) {
-      const controllerMeta = Reflect.getMetadata(
-        METADATA_KEYS.CONTROLLER,
-        ControllerClass
-      ) as { basePath: string; } | undefined;
+      const meta = getMeta(ControllerClass as unknown as Function);
+      if (!meta) continue;
 
+      const controllerMeta = meta[METADATA_KEYS.CONTROLLER] as { basePath: string; } | undefined;
       if (!controllerMeta) continue;
 
-      const routes = (Reflect.getMetadata(
-        METADATA_KEYS.ROUTES,
-        ControllerClass
-      ) as RouteMetadata[] | undefined) ?? [];
+      const routes = (meta[METADATA_KEYS.ROUTES] as RouteMetadata[] | undefined) ?? [];
 
-      // Class-level OpenAPI metadata (tags from @ApiTags on the class)
-      const classMeta = (Reflect.getMetadata(
-        METADATA_KEYS.OPENAPI,
-        ControllerClass
-      ) as OpenAPIMetadata | undefined) ?? {};
+      // Class-level tags from @ApiTags on the class
+      const classOpenApi = (meta[METADATA_KEYS.CLASS_OPENAPI] as OpenAPIMetadata | undefined) ?? {};
 
-      const proto = ControllerClass.prototype as object;
-      const controllerName = ControllerClass.name;
+      // Per-method metadata
+      const allMethodOpenApi = (meta[METADATA_KEYS.OPENAPI] as Record<string, OpenAPIMetadata> | undefined) ?? {};
+      const allGuards = (meta[METADATA_KEYS.GUARDS] as Record<string, GuardMetadata[]> | undefined) ?? {};
+      const isPublicMap = (meta[METADATA_KEYS.IS_PUBLIC] as Record<string, boolean> | undefined) ?? {};
+      const allSse = (meta[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
+      const allWs = (meta[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
 
       for (const route of routes) {
-        // Skip methods that don't map cleanly to OpenAPI operations
         if (route.method === 'all') continue;
 
         const { method, path, handlerName } = route;
@@ -114,25 +114,14 @@ export class OpenAPIGenerator {
         const openApiPath = honoPathToOpenAPI(honoFullPath);
         const openApiMethod = method === 'head' ? 'head' : method;
 
-        /* --- Read metadata --- */
-        const methodMeta = (Reflect.getMetadata(
-          METADATA_KEYS.OPENAPI, proto, handlerName
-        ) as OpenAPIMetadata | undefined) ?? {};
-
-        const params = (Reflect.getMetadata(
-          METADATA_KEYS.PARAMS, proto, handlerName
-        ) as ParamMetadata[] | undefined) ?? [];
-
-        const guards = (Reflect.getMetadata(
-          METADATA_KEYS.GUARDS, proto, handlerName
-        ) as GuardMetadata[] | undefined) ?? [];
-
-        const isPublic = Reflect.getMetadata('isPublic', proto, handlerName) as boolean | undefined;
-        const isSse = Reflect.getMetadata(METADATA_KEYS.SSE_ROUTE, proto, handlerName) as boolean | undefined;
-        const isWs = Reflect.getMetadata(METADATA_KEYS.WEBSOCKET_ROUTE, proto, handlerName) as boolean | undefined;
+        const methodMeta = allMethodOpenApi[handlerName] ?? {};
+        const guards = allGuards[handlerName] ?? [];
+        const isPublic = isPublicMap[handlerName] ?? false;
+        const isSse = allSse[handlerName] ?? false;
+        const isWs = allWs[handlerName] ?? false;
 
         /* --- Tags --- */
-        const tags = [...(classMeta.tags ?? []), ...(methodMeta.tags ?? [])];
+        const tags = [...(classOpenApi.tags ?? []), ...(methodMeta.tags ?? [])];
 
         /* --- Security --- */
         const needsAuth = !isPublic && guards.some(g =>
@@ -140,42 +129,11 @@ export class OpenAPIGenerator {
         );
         if (needsAuth) needsBearerAuth = true;
 
-        /* --- Path parameters --- */
+        /* --- Path parameters (inferred from URL) --- */
         const pathParamNames = extractPathParamNames(honoFullPath);
-        const parameters: unknown[] = pathParamNames.map(name => {
-          const meta = params.find(p => p.type === 'param' && p.name === name);
-          return compact({
-            name,
-            in: 'path',
-            required: true,
-            schema: meta?.schema ? zodToJsonSchema(meta.schema) : { type: 'string' },
-          });
-        });
-
-        /* --- Query parameters --- */
-        const queryParam = params.find(p => p.type === 'query');
-        if (queryParam?.schema) {
-          const qs = zodToJsonSchema(queryParam.schema);
-          if (qs['type'] === 'object' && qs['properties']) {
-            const props = qs['properties'] as Record<string, unknown>;
-            const required = (qs['required'] as string[] | undefined) ?? [];
-            for (const [name, propSchema] of Object.entries(props)) {
-              parameters.push(compact({ name, in: 'query', required: required.includes(name), schema: propSchema }));
-            }
-          }
-        } else if (queryParam) {
-          // @Query() without schema — free-form object
-          parameters.push({ name: 'query', in: 'query', required: false, schema: { type: 'object' } });
-        }
-
-        /* --- Request body --- */
-        const bodyParam = params.find(p => p.type === 'body');
-        const requestBody = bodyParam?.schema
-          ? {
-            required: true,
-            content: { 'application/json': { schema: zodToJsonSchema(bodyParam.schema) } },
-          }
-          : undefined;
+        const parameters: unknown[] = pathParamNames.map(name =>
+          compact({ name, in: 'path', required: true, schema: { type: 'string' } })
+        );
 
         /* --- Responses --- */
         const responses: Record<string, unknown> = {};
@@ -193,23 +151,6 @@ export class OpenAPIGenerator {
           responses['200'] = { description: isSse ? 'SSE stream' : isWs ? 'WebSocket upgrade' : 'Success' };
         }
 
-        if (bodyParam?.schema || queryParam?.schema) {
-          responses['400'] = {
-            description: 'Validation error',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    status: { type: 'string' },
-                    error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } } },
-                  },
-                },
-              },
-            },
-          };
-        }
-
         if (needsAuth) {
           responses['401'] = { description: 'Unauthorized' };
           responses['403'] = { description: 'Forbidden' };
@@ -220,12 +161,13 @@ export class OpenAPIGenerator {
         const operation = compact({
           operationId: `${openApiMethod}_${handlerName}`,
           summary: methodMeta.summary,
-          description: methodMeta.description ? `${descriptionPrefix}${methodMeta.description}` : (isSse || isWs ? descriptionPrefix.trim() : undefined),
+          description: methodMeta.description
+            ? `${descriptionPrefix}${methodMeta.description}`
+            : (isSse || isWs ? descriptionPrefix.trim() : undefined),
           tags: tags.length > 0 ? tags : undefined,
           deprecated: methodMeta.deprecated,
           security: needsAuth ? [{ bearerAuth: [] }] : isPublic ? [] : undefined,
           parameters: parameters.length > 0 ? parameters : undefined,
-          requestBody,
           responses,
         });
 
@@ -247,10 +189,6 @@ export class OpenAPIGenerator {
 
   /**
    * Mount `/openapi.json` and Scalar UI (`/docs`) onto an existing Hono app.
-   *
-   * @example
-   * const spec = OpenAPIGenerator.generate([UserController], { info: { title: 'API', version: '1.0.0' } });
-   * OpenAPIGenerator.mount(app, spec);
    */
   static mount(
     app: Hono,

@@ -1,8 +1,14 @@
-import 'reflect-metadata';
 import { METADATA_KEYS } from '../decorators/metadata';
 import type { ConcreteConstructor } from '../core/types';
 
 type AnyConstructor = ConcreteConstructor<unknown>;
+type ClassMeta = Record<symbol, unknown>;
+
+function isController(exported: unknown): exported is AnyConstructor {
+  if (typeof exported !== 'function') return false;
+  const meta = (exported as { [Symbol.metadata]?: ClassMeta })[Symbol.metadata];
+  return meta?.[METADATA_KEYS.CONTROLLER] !== undefined;
+}
 
 /**
  * Scans a glob pattern and dynamically imports all files, returning every
@@ -44,14 +50,8 @@ export async function discoverControllers(
  * Works with any bundler that supports import.meta.glob (Vite, Bun bundler).
  *
  * @example
- * // Vite / Bun bundler
  * const modules = import.meta.glob('./controllers/**\/*.ts', { eager: true });
  * const controllers = fromModules(modules);
- *
- * const app = new Hono();
- * for (const ctrl of controllers) {
- *   app.route('/', HonoRouteBuilder.build(ctrl));
- * }
  */
 export function fromModules(
   modules: Record<string, Record<string, unknown>>
@@ -63,16 +63,8 @@ export function fromModules(
   return controllers;
 }
 
-function extractControllers(
-  mod: Record<string, unknown>,
-  out: AnyConstructor[]
-): void {
+function extractControllers(mod: Record<string, unknown>, out: AnyConstructor[]): void {
   for (const exported of Object.values(mod)) {
-    if (
-      typeof exported === 'function' &&
-      Reflect.getMetadata(METADATA_KEYS.CONTROLLER, exported) !== undefined
-    ) {
-      out.push(exported as AnyConstructor);
-    }
+    if (isController(exported)) out.push(exported as AnyConstructor);
   }
 }

@@ -1,215 +1,191 @@
-import 'reflect-metadata';
-
+import type { Context } from 'hono';
 import type { ZodType } from 'zod';
+import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
 
-import type { ParamMetadata } from './metadata';
-import { METADATA_KEYS } from './metadata';
+/* ===============================================================
+ * Context helper functions — drop-in replacements for the old
+ * parameter decorators. Call them inside your handler:
+ *
+ *   @Post()
+ *   async create(c: Context) {
+ *     const body = await Body(c, CreateSchema);
+ *     const id   = Param(c, 'id');
+ *     const q    = Query(c);
+ *   }
+ * =============================================================== */
 
-/* ================= TYPES ================= */
+/* ================= BODY ================= */
 
-type ZodSchemaType = ZodType;
-
-/* ================= FACTORY ================= */
-
-function createParamDecorator(
-  type: ParamMetadata['type']
-) {
-  return function (
-    nameOrSchema?: string | ZodSchemaType,
-    schema?: ZodSchemaType
-  ): ParameterDecorator {
-    return (
-      target: object,
-      propertyKey: string | symbol | undefined,
-      parameterIndex: number
-    ): void => {
-      if (!propertyKey) return;
-
-      const params =
-        (Reflect.getMetadata(
-          METADATA_KEYS.PARAMS,
-          target,
-          propertyKey
-        ) as ParamMetadata[] | undefined) ?? [];
-
-      let name: string | undefined;
-      let validationSchema:
-        | ZodSchemaType
-        | undefined;
-
-      if (typeof nameOrSchema === 'string') {
-        name = nameOrSchema;
-        validationSchema = schema;
-      } else if (nameOrSchema) {
-        validationSchema = nameOrSchema;
-      }
-
-      const metadata: ParamMetadata = {
-        type,
-        index: parameterIndex,
-        name,
-        schema: validationSchema,
-      };
-
-      params.push(metadata);
-
-      Reflect.defineMetadata(
-        METADATA_KEYS.PARAMS,
-        params,
-        target,
-        propertyKey
-      );
-    };
-  };
+export async function Body<T>(c: Context, schema: ZodType<T>): Promise<T>;
+export async function Body(c: Context): Promise<unknown>;
+export async function Body(c: Context, schema?: ZodType): Promise<unknown> {
+  const raw = await c.req.json() as unknown;
+  return schema ? schema.parseAsync(raw) : raw;
 }
 
-/* ================= BASIC DECORATORS ================= */
+/* ================= PARAM ================= */
 
-export const Body =
-  createParamDecorator('body');
-
-export const Param =
-  createParamDecorator('param');
-
-export const Query =
-  createParamDecorator('query');
-
-export const Headers =
-  createParamDecorator('headers');
-
-export const User =
-  createParamDecorator('user');
-
-export const Req =
-  createParamDecorator('req');
-
-export const Res =
-  createParamDecorator('res');
-
-/** Injects the Hono Context `c` directly. Prefer this over `@Res()` for clarity. */
-export const Ctx =
-  createParamDecorator('ctx');
-
-/**
- * @deprecated `@Next()` always returns `undefined` in Hono's request model.
- * Hono middleware uses `await next()` internally — there is no Express-style next callback.
- * Remove this decorator from your handlers.
- */
-export const Next =
-  createParamDecorator('next');
-
-export const SseStream =
-  createParamDecorator('sse');
-
-/** Injects the real client IP (respects CF-Connecting-IP, X-Real-IP, X-Forwarded-For). */
-export const Ip =
-  createParamDecorator('ip');
-
-/** Injects the detected device type: 'mobile' | 'tablet' | 'desktop' | 'bot'. */
-export const Device =
-  createParamDecorator('device');
-
-/** Injects the raw User-Agent header string. */
-export const UserAgent =
-  createParamDecorator('useragent');
-
-/** Injects a single cookie value by name. */
-export function Cookie(name: string): ParameterDecorator {
-  return createParamDecorator('cookie')(name);
+export function Param(c: Context, name: string): string;
+export function Param(c: Context): Record<string, string>;
+export function Param(c: Context, name?: string): string | Record<string, string> {
+  if (name !== undefined) return c.req.param(name) ?? '';
+  return c.req.param() as Record<string, string>;
 }
 
-/** Injects all cookies as a `Record<string, string>`. */
-export function Cookies(): ParameterDecorator {
-  return createParamDecorator('cookies')();
+/* ================= QUERY ================= */
+
+export async function Query<T>(c: Context, schema: ZodType<T>): Promise<T>;
+export function Query(c: Context): Record<string, string>;
+export function Query(c: Context, schema?: ZodType): unknown {
+  const raw = c.req.query();
+  return schema ? schema.parseAsync(raw) : raw;
+}
+
+/* ================= HEADERS ================= */
+
+export function Headers(c: Context, name: string): string | undefined;
+export function Headers(c: Context): Record<string, string>;
+export function Headers(c: Context, name?: string): string | undefined | Record<string, string> {
+  return name ? c.req.header(name) : c.req.header();
+}
+
+/* ================= USER ================= */
+
+export function User<T = unknown>(c: Context): T {
+  return c.get('user') as T;
+}
+
+/* ================= REQ / CTX / RES ================= */
+
+/** Returns `c.req` — the Hono HonoRequest object. */
+export function Req(c: Context): Context['req'] {
+  return c.req;
+}
+
+/** Returns the full Hono Context `c`. Alias for readability. */
+export function Ctx(c: Context): Context {
+  return c;
+}
+
+/** Returns the full Hono Context `c`. Same as Ctx(). */
+export const Res = Ctx;
+
+/* ================= IP / DEVICE / USER-AGENT ================= */
+
+/** Resolves the real client IP (CF-Connecting-IP → X-Real-IP → X-Forwarded-For). */
+export function Ip(c: Context): string {
+  return extractIp(c);
+}
+
+/** Detects device type: 'mobile' | 'tablet' | 'desktop' | 'bot'. */
+export function Device(c: Context): 'mobile' | 'tablet' | 'desktop' | 'bot' {
+  return detectDevice(extractUserAgent(c));
+}
+
+/** Returns the raw User-Agent header string. */
+export function UserAgent(c: Context): string {
+  return extractUserAgent(c);
+}
+
+/* ================= COOKIES ================= */
+
+function parseCookies(header: string): Record<string, string> {
+  return Object.fromEntries(
+    header.split(';').filter(Boolean).map((s) => {
+      const eq = s.indexOf('=');
+      return [s.slice(0, eq).trim(), decodeURIComponent(s.slice(eq + 1).trim())];
+    })
+  );
+}
+
+/** Get a single cookie value by name. */
+export function Cookie(c: Context, name: string): string | undefined {
+  return parseCookies(c.req.header('cookie') ?? '')[name];
+}
+
+/** Get all cookies as a Record<string, string>. */
+export function Cookies(c: Context): Record<string, string> {
+  return parseCookies(c.req.header('cookie') ?? '');
 }
 
 /* ================= FILE UPLOAD ================= */
 
 /**
- * Injects a single uploaded file from multipart form data.
+ * Get a single uploaded file from multipart form data.
  *
  * @example
  * @Post('/avatar')
- * upload(@UploadedFile('avatar') file: File | null) {
- *   if (!file) return { error: 'no file' };
- *   return { name: file.name, size: file.size };
+ * async upload(c: Context) {
+ *   const file = await UploadedFile(c, 'avatar');
+ *   return { name: file?.name, size: file?.size };
  * }
  */
-export function UploadedFile(fieldName: string): ParameterDecorator {
-  return createParamDecorator('uploadedfile')(fieldName);
+export async function UploadedFile(c: Context, fieldName: string): Promise<File | null> {
+  const fd = await c.req.formData();
+  const val = fd.get(fieldName);
+  return val instanceof File ? val : null;
 }
 
 /**
- * Injects all uploaded files from multipart form data.
- * Pass a fieldName to filter by field, or omit to get every file in the form.
+ * Get all uploaded files from multipart form data.
+ * Pass a fieldName to filter by field, or omit to get every file.
  *
  * @example
  * @Post('/gallery')
- * upload(@UploadedFiles('images') files: File[]) {
- *   return files.map(f => ({ name: f.name, size: f.size }));
+ * async upload(c: Context) {
+ *   const files = await UploadedFiles(c, 'images');
+ *   return files.map(f => ({ name: f.name }));
  * }
  */
-export function UploadedFiles(fieldName?: string): ParameterDecorator {
-  return createParamDecorator('uploadedfiles')(fieldName);
+export async function UploadedFiles(c: Context, fieldName?: string): Promise<File[]> {
+  const fd = await c.req.formData();
+  const result: File[] = [];
+  const entries = fieldName ? fd.getAll(fieldName) : [...fd.values()];
+  for (const v of entries) {
+    if (v instanceof File) result.push(v);
+  }
+  return result;
 }
 
 /**
- * Injects the raw FormData object from a multipart request.
+ * Get the raw FormData object from a multipart request.
  *
  * @example
  * @Post('/submit')
- * submit(@FormBody() form: FormData) {
+ * async submit(c: Context) {
+ *   const form = await FormBody(c);
  *   const name = form.get('name');
- *   return { name };
  * }
  */
-export function FormBody(): ParameterDecorator {
-  return createParamDecorator('formbody')();
+export async function FormBody(c: Context): Promise<FormData> {
+  return c.req.formData();
 }
 
-/* ================= VALIDATED (INFERRED) ================= */
+/* ================= VALIDATED SHORTHANDS ================= */
 
 /**
- * Type-safe Body decorator with Zod inference
+ * Type-safe Body — same as Body(c, schema) but emphasises validation intent.
+ *
+ * @example
+ * const data = await ValidatedBody(c, CreateSchema);  // data is z.infer<typeof CreateSchema>
  */
-export function ValidatedBody<
-  T extends ZodSchemaType
->(schema: T): ParameterDecorator & {
-  __type?: T['_output'];
-} {
-  return Body(schema) as ParameterDecorator & {
-    __type?: T['_output'];
-  };
-}
+export const ValidatedBody = Body;
 
 /**
- * Type-safe Query decorator with Zod inference
+ * Type-safe Query — same as Query(c, schema).
  */
-export function ValidatedQuery<
-  T extends ZodSchemaType
->(schema: T): ParameterDecorator & {
-  __type?: T['_output'];
-} {
-  return Query(schema) as ParameterDecorator & {
-    __type?: T['_output'];
-  };
-}
+export const ValidatedQuery = Query;
 
 /**
- * Type-safe Param decorator with Zod inference
+ * Type-safe Param — parses a single route param through a Zod schema.
+ *
+ * @example
+ * const id = await ValidatedParam(c, 'id', z.string().uuid());
  */
-export function ValidatedParam<
-  T extends ZodSchemaType
->(
+export async function ValidatedParam<T>(
+  c: Context,
   name: string,
-  schema: T
-): ParameterDecorator & {
-  __type?: T['_output'];
-} {
-  return Param(
-    name,
-    schema
-  ) as ParameterDecorator & {
-    __type?: T['_output'];
-  };
+  schema: ZodType<T>
+): Promise<T> {
+  return schema.parseAsync(c.req.param(name));
 }

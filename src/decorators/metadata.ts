@@ -1,25 +1,61 @@
 import type { Context, Next } from 'hono';
-import 'reflect-metadata';
-
 import type { ZodType } from 'zod';
+
+/* ================= Symbol.metadata POLYFILL ================= */
+// Bun < 1.2 supports TC39 stage 3 decorators but does not expose Symbol.metadata
+// globally. The symbol IS set on classes by the runtime, so we discover it via
+// a sentinel class and assign it back to Symbol.metadata once.
+if (typeof (Symbol as unknown as Record<string, unknown>)['metadata'] === 'undefined') {
+  let _sym: symbol | undefined;
+  const _sentinel = (_v: unknown, _ctx: unknown) => { };
+  @_sentinel class _SymbolMetadataBootstrap { }
+  _sym = Object.getOwnPropertySymbols(_SymbolMetadataBootstrap as unknown as object)
+    .find(s => s.toString() === 'Symbol(Symbol.metadata)');
+  if (_sym) {
+    Object.defineProperty(Symbol, 'metadata', { value: _sym, configurable: true });
+  }
+}
 
 /* ================= KEYS ================= */
 
 export const METADATA_KEYS = {
   CONTROLLER: Symbol('controller'),
   ROUTES: Symbol('routes'),
-  PARAMS: Symbol('params'),
   GUARDS: Symbol('guards'),
-  INTERCEPTORS: Symbol('interceptors'),
   MIDDLEWARES: Symbol('middlewares'),
+  METHOD_MIDDLEWARES: Symbol('methodMiddlewares'),
   VALIDATION: Symbol('validation'),
   CACHE: Symbol('cache'),
   RATE_LIMIT: Symbol('rateLimit'),
   OPENAPI: Symbol('openapi'),
+  CLASS_OPENAPI: Symbol('classOpenapi'),
   CUSTOM: Symbol('custom'),
   SSE_ROUTE: Symbol('sseRoute'),
   WEBSOCKET_ROUTE: Symbol('websocketRoute'),
+  IS_PUBLIC: Symbol('isPublic'),
+  IS_PRIVATE: Symbol('isPrivate'),
+  INJECTABLE: Symbol('injectable'),
+  SINGLETON: Symbol('singleton'),
+  REQUEST_SCOPED: Symbol('requestScoped'),
+  STATELESS: Symbol('stateless'),
+  INJECT_PARAMS: Symbol('injectParams'),
 } as const;
+
+/* ================= HELPERS ================= */
+
+type ClassMeta = Record<symbol, unknown>;
+
+/** Read typed metadata from a class's Symbol.metadata object. */
+export function getClassMeta<T>(target: Function, key: symbol): T | undefined {
+  const meta = (target as unknown as { [Symbol.metadata]?: ClassMeta })[Symbol.metadata];
+  return meta?.[key] as T | undefined;
+}
+
+/** Read per-method metadata stored as Record<string, T> keyed by method name. */
+export function getMethodMeta<T>(target: Function, key: symbol, methodName: string): T | undefined {
+  const all = getClassMeta<Record<string, T>>(target, key);
+  return all?.[methodName];
+}
 
 /* ================= ROUTE ================= */
 
@@ -37,35 +73,6 @@ export interface ControllerMetadata {
   basePath: string;
   platform?: 'mobile' | 'web';
   routes: RouteMetadata[];
-}
-
-/* ================= PARAM ================= */
-
-export interface ParamMetadata {
-  type:
-  | 'body'
-  | 'param'
-  | 'query'
-  | 'headers'
-  | 'user'
-  | 'req'
-  | 'res'
-  | 'ctx'
-  | 'next'
-  | 'sse'
-  | 'ip'
-  | 'device'
-  | 'useragent'
-  | 'uploadedfile'
-  | 'uploadedfiles'
-  | 'formbody'
-  | 'cookie'
-  | 'cookies';
-
-  index: number;
-  name?: string;
-
-  schema?: ZodType;
 }
 
 /* ================= GUARD ================= */
@@ -86,7 +93,6 @@ export type HonoMiddlewareFn = (c: Context, next: Next) => Promise<Response | vo
 
 export interface ValidationMetadata {
   type: 'body' | 'query' | 'params';
-
   schema: ZodType;
 }
 
@@ -97,14 +103,7 @@ export interface OpenAPIMetadata {
   description?: string;
   tags?: string[];
   deprecated?: boolean;
-
-  responses?: Record<
-    number,
-    {
-      description?: string;
-      schema?: ZodType;
-    }
-  >;
+  responses?: Record<number, { description?: string; schema?: ZodType; }>;
 }
 
 /* ================= CACHE ================= */
