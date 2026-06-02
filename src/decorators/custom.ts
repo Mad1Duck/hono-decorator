@@ -2,8 +2,8 @@ import type { ZodTypeAny } from 'zod';
 import { txStorage } from '../utils/transaction';
 import { getRequestContext, createRequestContext, runInRequestContext, type CacheEntry } from '../core/request-context';
 
-type AnyFn = (...args: unknown[]) => unknown;
-type MethodDec = (value: Function, context: ClassMethodDecoratorContext) => Function;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyFn = (...args: any[]) => any;
 
 /* ================= MEMOIZE REQUEST SCOPE ================= */
 
@@ -14,21 +14,17 @@ export function runWithMemoScope<T>(fn: () => T): T {
 
 /* ================= THROTTLE ================= */
 
-export function Throttle(ms: number): MethodDec {
+export function Throttle(ms: number) {
   const lastCallMap = new WeakMap<object, number>();
 
-  return (originalFn) => {
-    return async function (this: object, ...args: unknown[]) {
+  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+    return (async function (this: object, ...args: unknown[]) {
       const now = Date.now();
       const lastCall = lastCallMap.get(this) ?? 0;
-
-      if (now - lastCall < ms) {
-        throw new Error(`Throttled: wait ${ms - (now - lastCall)}ms`);
-      }
-
+      if (now - lastCall < ms) throw new Error(`Throttled: wait ${ms - (now - lastCall)}ms`);
       lastCallMap.set(this, now);
       return await (originalFn as AnyFn).apply(this, args);
-    };
+    }) as unknown as T;
   };
 }
 
@@ -36,12 +32,12 @@ export function Throttle(ms: number): MethodDec {
 
 export function Memoize(
   options: { ttl?: number; scope?: 'global' | 'request'; } = {}
-): MethodDec {
+) {
   const globalCache = new Map<string, CacheEntry>();
   const methodId = `memo_${Math.random().toString(36).slice(2)}`;
 
-  return (originalFn) => {
-    return async function (this: unknown, ...args: unknown[]) {
+  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+    return (async function (this: unknown, ...args: unknown[]) {
       const key = JSON.stringify(args);
       const scope = options.scope ?? 'global';
 
@@ -65,18 +61,18 @@ export function Memoize(
       const result = await (originalFn as AnyFn).apply(this, args);
       cache.set(key, { value: result, expires: options.ttl ? Date.now() + options.ttl : Infinity });
       return result;
-    };
+    }) as unknown as T;
   };
 }
 
 /* ================= VALIDATE RESULT ================= */
 
-export function ValidateResult(schema: ZodTypeAny): MethodDec {
-  return (originalFn) => {
-    return async function (this: unknown, ...args: unknown[]) {
+export function ValidateResult(schema: ZodTypeAny) {
+  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+    return (async function (this: unknown, ...args: unknown[]) {
       const result = await (originalFn as AnyFn).apply(this, args);
       return await schema.parseAsync(result);
-    };
+    }) as unknown as T;
   };
 }
 
@@ -84,26 +80,19 @@ export function ValidateResult(schema: ZodTypeAny): MethodDec {
 
 type LoggerLike = { info?: (data: unknown, message?: string) => void; };
 
-export function Audit(options: { action: string; }): MethodDec {
-  return (originalFn, context) => {
+export function Audit(options: { action: string; }) {
+  return <T extends AnyFn>(originalFn: T, context: ClassMethodDecoratorContext): T => {
     const methodRef = String(context.name);
-    return async function (this: { logger?: LoggerLike; currentUser?: { id?: string; }; }, ...args: unknown[]) {
+    return (async function (this: { logger?: LoggerLike; currentUser?: { id?: string; }; }, ...args: unknown[]) {
       const log: LoggerLike = this.logger ?? {
         info: (data, msg) => console.log(`[${methodRef}]`, msg, data),
       };
-
       log.info?.(
-        {
-          action: options.action,
-          user: this.currentUser?.id,
-          timestamp: new Date().toISOString(),
-          method: methodRef,
-        },
+        { action: options.action, user: this.currentUser?.id, timestamp: new Date().toISOString(), method: methodRef },
         'Audit log'
       );
-
       return await (originalFn as AnyFn).apply(this, args);
-    };
+    }) as unknown as T;
   };
 }
 
@@ -119,18 +108,17 @@ export type TransactionExecutor<TDb = unknown> = (
 const defaultExecutor: TransactionExecutor = (db, run) =>
   (db as DbLike).transaction((tx) => run(tx as typeof db));
 
-export function Transaction(executor?: TransactionExecutor): MethodDec {
-  return (originalFn, context) => {
+export function Transaction(executor?: TransactionExecutor) {
+  return <T extends AnyFn>(originalFn: T, context: ClassMethodDecoratorContext): T => {
     const exec = executor ?? defaultExecutor;
-    return async function (this: { db?: unknown; }, ...args: unknown[]) {
+    return (async function (this: { db?: unknown; }, ...args: unknown[]) {
       if (!this.db) {
         throw new Error(`@Transaction: 'db' property not found on ${String(context.name)}`);
       }
-
       return exec(this.db, async (tx) =>
         txStorage.run(tx, () => (originalFn as AnyFn).apply(this, args))
       );
-    };
+    }) as unknown as T;
   };
 }
 

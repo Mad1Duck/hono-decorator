@@ -9,6 +9,7 @@ import {
   Options,
   All,
   WebSocket,
+  Param,
   Injectable,
   Singleton,
   RequireAuth,
@@ -82,7 +83,7 @@ class ItemController {
 
   @Get('/:id')
   @Public()
-  getOne(c: Context) { return this.svc.getById(c.req.param('id')); }
+  getOne(c: Context) { return this.svc.getById(Param(c, 'id')); }
 
   @Post()
   @Public()
@@ -173,7 +174,7 @@ class PatchController {
   @Patch('/:id')
   @Public()
   async update(c: Context) {
-    const id = c.req.param('id');
+    const id = Param(c, 'id');
     const body = await PatchItemSchema.parseAsync(await c.req.json());
     this.items[id] = body.name;
     return { id, name: body.name };

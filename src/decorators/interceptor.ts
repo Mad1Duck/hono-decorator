@@ -1,8 +1,8 @@
 import { METADATA_KEYS } from './metadata';
 import type { CacheMetadata } from './metadata';
 
-type AnyFn = (...args: unknown[]) => unknown;
-type MethodDec = (value: Function, context: ClassMethodDecoratorContext) => Function;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyFn = (...args: any[]) => any;
 
 type MetricsLike = {
   trackMethodDuration?: (name: string, duration: number, status: 'success' | 'error') => void;
@@ -20,10 +20,10 @@ export function Cache(options: CacheMetadata): (value: Function, context: ClassM
 
 /* ================= TRACK METRICS ================= */
 
-export function TrackMetrics(options?: { name?: string; }): MethodDec {
-  return (originalFn, context) => {
+export function TrackMetrics(options?: { name?: string; }) {
+  return <T extends AnyFn>(originalFn: T, context: ClassMethodDecoratorContext): T => {
     const metricName = options?.name ?? `?.${String(context.name)}`;
-    return async function (this: { metrics?: MetricsLike; }, ...args: unknown[]) {
+    return (async function (this: { metrics?: MetricsLike; }, ...args: unknown[]) {
       const start = Date.now();
       try {
         const result = await (originalFn as AnyFn).apply(this, args);
@@ -33,28 +33,27 @@ export function TrackMetrics(options?: { name?: string; }): MethodDec {
         this.metrics?.trackMethodDuration?.(metricName, Date.now() - start, 'error');
         throw error;
       }
-    };
+    }) as unknown as T;
   };
 }
 
 /* ================= TRANSFORM ================= */
 
-export function Transform<TInput, TOutput>(transformer: (data: TInput) => TOutput): MethodDec {
-  return (originalFn) => {
-    return async function (this: unknown, ...args: unknown[]) {
+export function Transform<TInput, TOutput>(transformer: (data: TInput) => TOutput) {
+  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+    return (async function (this: unknown, ...args: unknown[]) {
       const result = (await (originalFn as AnyFn).apply(this, args)) as TInput;
       return transformer(result);
-    };
+    }) as unknown as T;
   };
 }
 
 /* ================= RETRY ================= */
 
-export function Retry(options: { attempts: number; delay?: number; backoff?: 'exponential' | 'linear'; }): MethodDec {
-  return (originalFn) => {
-    return async function (this: unknown, ...args: unknown[]) {
+export function Retry(options: { attempts: number; delay?: number; backoff?: 'exponential' | 'linear'; }) {
+  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+    return (async function (this: unknown, ...args: unknown[]) {
       let lastError: unknown;
-
       for (let attempt = 1; attempt <= options.attempts; attempt++) {
         try {
           return await (originalFn as AnyFn).apply(this, args);
@@ -69,23 +68,22 @@ export function Retry(options: { attempts: number; delay?: number; backoff?: 'ex
           }
         }
       }
-
       throw lastError;
-    };
+    }) as unknown as T;
   };
 }
 
 /* ================= TIMEOUT ================= */
 
-export function Timeout(ms: number): MethodDec {
-  return (originalFn) => {
-    return async function (this: unknown, ...args: unknown[]) {
+export function Timeout(ms: number) {
+  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+    return (async function (this: unknown, ...args: unknown[]) {
       return Promise.race([
         (originalFn as AnyFn).apply(this, args),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
         ),
       ]);
-    };
+    }) as unknown as T;
   };
 }

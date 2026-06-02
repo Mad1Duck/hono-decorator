@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v1.0.0...v3.0.0) (2026-06-02)
+
+## [2.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v1.0.0...v2.0.0) (2026-06-02)
+
 ## [1.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v0.2.6...v1.0.0) (2026-06-02)
 
 > **Major release** — migrated to TC39 Stage 3 decorators. No tsconfig flags, no `reflect-metadata`. See breaking changes below.
