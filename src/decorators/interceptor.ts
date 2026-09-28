@@ -19,6 +19,23 @@ export function Cache(options: CacheMetadata): (value: Function, context: ClassM
   };
 }
 
+/**
+ * Invalidate cache entries after this handler succeeds.
+ * Each pattern is a key prefix — `'user-list'` or `'user-list:*'` deletes every
+ * @Cache entry whose key starts with `user-list:`.
+ *
+ * @example
+ * @Post() @CacheInvalidate('user-list')
+ * create(c: Context) { ... }
+ */
+export function CacheInvalidate(...patterns: string[]): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.CACHE_INVALIDATE] as Record<string, string[]> | undefined) ?? {};
+    all[String(context.name)] = patterns;
+    context.metadata[METADATA_KEYS.CACHE_INVALIDATE] = all;
+  };
+}
+
 /* ================= TRACK METRICS ================= */
 
 export function TrackMetrics(options?: { name?: string; }) {

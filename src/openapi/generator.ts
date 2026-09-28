@@ -129,11 +129,20 @@ export class OpenAPIGenerator {
         );
         if (needsAuth) needsBearerAuth = true;
 
-        /* --- Path parameters (inferred from URL) --- */
+        /* --- Path parameters (inferred from URL) + @ApiQuery --- */
         const pathParamNames = extractPathParamNames(honoFullPath);
         const parameters: unknown[] = pathParamNames.map(name =>
           compact({ name, in: 'path', required: true, schema: { type: 'string' } })
         );
+        for (const [qname, q] of Object.entries(methodMeta.query ?? {})) {
+          parameters.push(compact({
+            name: qname,
+            in: 'query',
+            required: q.required ?? !q.schema.safeParse(undefined).success,
+            description: q.description,
+            schema: zodToJsonSchema(q.schema),
+          }));
+        }
 
         /* --- Responses --- */
         const responses: Record<string, unknown> = {};
@@ -168,6 +177,13 @@ export class OpenAPIGenerator {
           deprecated: methodMeta.deprecated,
           security: needsAuth ? [{ bearerAuth: [] }] : isPublic ? [] : undefined,
           parameters: parameters.length > 0 ? parameters : undefined,
+          requestBody: methodMeta.body
+            ? compact({
+              required: methodMeta.body.required ?? !methodMeta.body.schema.safeParse(undefined).success,
+              description: methodMeta.body.description,
+              content: { 'application/json': { schema: zodToJsonSchema(methodMeta.body.schema) } },
+            })
+            : undefined,
           responses,
         });
 

@@ -126,9 +126,33 @@ OpenAPIGenerator.mount(app, spec);
 export default app;
 ```
 
-Annotate controllers with `@ApiTags`, `@ApiDoc`, `@ApiResponse`, `@ApiDeprecated` — auth, validation, and path params are reflected automatically.
+Annotate controllers with `@ApiTags`, `@ApiDoc`, `@ApiResponse`, `@ApiDeprecated` — auth, validation, and path params are reflected automatically. For request bodies and query params, use `@ApiBody` and `@ApiQuery` — `required` is auto-inferred from the Zod schema (`.optional()`/`.default()` → optional):
+
+```ts
+@Post()
+@ApiBody(CreateUserSchema, { description: 'New user payload' })
+@ApiQuery('dryRun', z.boolean().optional())
+create(c: Context) { /* ... */ }
+```
 
 ---
+
+## Modules
+
+Group controllers and providers with `@Module`, then build the whole app in one call:
+
+```ts
+@Module({ controllers: [UserController], providers: [UserService] })
+class UserModule {}
+
+@Module({ imports: [UserModule], controllers: [OrderController] })
+class AppModule {}
+
+const app = new Hono();
+app.route('/', HonoRouteBuilder.buildModule(AppModule));
+```
+
+`imports` are traversed recursively and deduped; `providers` are eagerly resolved at build time so DI errors fail fast (except `@RequestScoped`, resolved per request). Modules organize wiring — they do not create isolated DI scopes or configs.
 
 ## Auto-discovery
 
@@ -507,6 +531,8 @@ app.route('/', HonoRouteBuilder.build(UserController, 'mobile'));
 
 **Trailing slash:** `HonoRouteBuilder.configure({ trailingSlash: 'strip' | 'add' })` redirects non-conforming URLs (`301` for GET/HEAD, `308` for other methods so the method and body are preserved). `'ignore'` (default) registers both variants without redirecting.
 
+**Introspection:** `HonoRouteBuilder.describe(Controller)` returns a `RouteDescription[]` — a read-only metadata snapshot (`method`, `path`, `guards`, `middlewares`, `cache`, `rateLimit`, `sse`, `websocket`, `isPublic`, `isPrivate`) without instantiating anything. Useful for debugging, tests, and tooling.
+
 ---
 
 ## Context helpers
@@ -800,6 +826,21 @@ class ApiController {
 
 All four can be used at class level (applies to every route) or method level (applies to one route). Options match Hono's underlying middleware — see [Hono middleware docs](https://hono.dev/docs/middleware/builtin/cors) for full option reference.
 
+### `@JwtAuth` — turnkey JWT auth
+
+Wraps `hono/jwt` (HS256 by default — pass `alg` to change). On a valid token the decoded payload is exposed via `User(c)`; invalid or missing tokens return `401`:
+
+```ts
+@Controller('/api')
+class MeController {
+  @Get('/me')
+  @JwtAuth({ secret: process.env.JWT_SECRET! })
+  me(c: Context) {
+    return User(c); // decoded JWT payload
+  }
+}
+```
+
 ---
 
 ## SSE (Server-Sent Events)
@@ -931,6 +972,24 @@ channels.publish(channel, event, data)   // broadcast to all subscribers
 channels.use(adapter)                    // swap adapter at startup
 ```
 
+### `@ChannelRoute` — automatic subscribe bridge
+
+On `@Sse` or `@WebSocket` routes, `@ChannelRoute` subscribes a channel client on connect and unsubscribes on disconnect — every published event is pushed to the stream/socket automatically:
+
+```ts
+@Sse('/events')
+@ChannelRoute((c) => `user:${User(c)?.id}`)   // static string or fn of Context
+async notifications(c: Context, stream: SSEStreamingApi) {
+  // optionally write initial events; the channel bridge handles the rest
+}
+
+@WebSocket('/chat')
+@ChannelRoute('room:general')
+chat(c: Context) {
+  return { onMessage: (e, ws) => { /* still works — bridge wraps onOpen/onClose */ } };
+}
+```
+
 ---
 
 ## Request logging
@@ -1028,6 +1087,29 @@ HonoRouteBuilder.configure({
 - Other errors → re-thrown to Hono's default 500 handler
 - Validation errors (`ZodError`) always return `400` and bypass `onError`
 
+### Exception filters — `@Catch` / `@UseFilters`
+
+Declarative per-type error handling, resolved through the DI container:
+
+```ts
+@Catch(PrismaClientKnownError)          // no args = catch-all
+class DbErrorFilter implements ExceptionFilter {
+  catch(err: unknown, c: Context) {
+    return c.json({ status: 'error', error: { code: 'DB_ERROR' } }, 500);
+  }
+}
+
+@Controller('/users')
+@UseFilters(DbErrorFilter)              // class-level: every route
+class UserController {
+  @Post()
+  @UseFilters(UploadErrorFilter)        // method-level: runs first
+  create(c: Context) { /* ... */ }
+}
+```
+
+Order: method-level filters → class-level filters → `onError` → default `HttpException` handling. A filter returning `void`/`undefined` falls through to the next step. Filters can inject services via `@Injectable`.
+
 ---
 
 ## Observability
@@ -1110,6 +1192,23 @@ getAll() { /* ... */ }
 ```
 
 > Cached hits skip the handler entirely. A handler returning a `Response` object is not cached. For return-value caching independent of HTTP, see `@Memoize`.
+
+### `@CacheInvalidate`
+
+Clears matching cache entries after a mutation handler succeeds. Each pattern is a key prefix — `'user-list'` deletes every `@Cache` entry whose key starts with `user-list:`:
+
+```ts
+@Post()
+@CacheInvalidate('user-list')
+create(c: Context) { /* ... */ }
+```
+
+Swap the in-memory store for Redis or another shared backend via `cacheAdapter`:
+
+```ts
+HonoRouteBuilder.configure({ cacheAdapter: new MyRedisCacheAdapter(redis) });
+// implements CacheAdapter: get / set / delete / deletePattern
+```
 
 ### `@Throttle`
 
@@ -1223,6 +1322,53 @@ const prismaExecutor: TransactionExecutor<PrismaClient> =
 ```
 
 ---
+
+## Typed client
+
+End-to-end types from decorator metadata — `generateClientTypes` emits a route map where each `output` is the controller method's `Awaited<ReturnType>`, and `createClient` gives a typed fetch client:
+
+```ts
+// 1. generate once (e.g. a script or codegen step)
+import { generateClientTypes } from 'hono-forge';
+const src = generateClientTypes({
+  controllers: [UserController],
+  importPath: '../server/controllers', // module specifier in the generated file
+});
+await Bun.write('./client/routes.ts', src);
+
+// 2. consume anywhere
+import { createClient } from 'hono-forge';
+import type { AppRoutes } from './client/routes';
+
+const api = createClient<AppRoutes>('http://localhost:3000');
+const users = await api.request('GET /users');                          // typed output
+const one = await api.request('GET /users/:id', { params: { id: '1' } });
+await api.request('POST /users', { body: { name: 'Ada' } });
+```
+
+Note: `output` is the handler's declared return type — handlers that return `Response` objects produce `Response` in the map (use plain-value returns for typed clients).
+
+## Testing
+
+`createTestingModule` gives you an isolated DI container for unit and e2e tests — framework-agnostic (works with `bun:test`, vitest, `node:test`):
+
+```ts
+import { createTestingModule } from 'hono-forge';
+
+const mod = createTestingModule({ controllers: [UserController] })
+  .overrideProvider(UserService).useValue({ findAll: () => [] }) // or .useClass() / .useFactory()
+  .compile();
+
+// unit-test the controller directly
+mod.get(UserController);
+
+// or e2e against a real Hono app
+const res = await mod.createApp().fetch(new Request('http://t/users'));
+
+mod.cleanup(); // restores the real container — always call this
+```
+
+Overrides win over already-resolved singletons, and `cleanup()` drops everything registered during the test.
 
 ## Full example
 

@@ -238,6 +238,23 @@ export class Container {
     this.resolutionStack = [];
   }
 
+  /**
+   * @internal Snapshot the registration maps for later restore().
+   * Used by createTestingModule — not intended for application code.
+   */
+  snapshot(): { singletons: Map<InjectionToken, unknown>; factories: Map<InjectionToken, Factory>; } {
+    return { singletons: new Map(this.singletons), factories: new Map(this.factories) };
+  }
+
+  /**
+   * @internal Restore a snapshot() — drops every registration made after it.
+   * Does not call onDestroy on dropped instances.
+   */
+  restore(snap: { singletons: Map<InjectionToken, unknown>; factories: Map<InjectionToken, Factory>; }): void {
+    this.singletons = new Map(snap.singletons);
+    this.factories = new Map(snap.factories);
+  }
+
   getRegisteredTokens(): InjectionToken[] {
     return [...new Set([...this.singletons.keys(), ...this.factories.keys()])];
   }

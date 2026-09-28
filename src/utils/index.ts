@@ -17,3 +17,5 @@ export { useTransaction } from './transaction';
 export { paginate, paginatedSchema, PaginationQuerySchema } from './pagination';
 export type { PaginatedResult, PaginationMeta, PaginationQuery } from './pagination';
 export { getTraceId, runWithTraceId } from './trace';
+export { createClient, generateClientTypes, ClientRequestError } from './client';
+export type { ForgeClient, ClientRequestInit, GenerateClientTypesOptions, RouteMap } from './client';

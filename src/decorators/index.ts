@@ -7,5 +7,8 @@ export * from './openapi';
 export * from './custom';
 export * from './middleware';
 export * from './common-middleware';
+export * from './filters';
+export * from './channel-route';
+export * from './module';
 export * from './sse';
 export * from './websocket';

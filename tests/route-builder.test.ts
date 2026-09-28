@@ -9,6 +9,7 @@ import {
   Options,
   All,
   WebSocket,
+  Sse,
   Param,
   Body,
   Cookie,
@@ -22,6 +23,9 @@ import {
   Private,
   RateLimit,
   Cache,
+  CacheInvalidate,
+  Catch,
+  UseFilters,
   Middleware,
   Use,
   Cors,
@@ -33,8 +37,15 @@ import {
   fromModules,
   getTraceId,
   HttpException,
+  ChannelRoute,
+  JwtAuth,
+  Module,
+  User,
+  channels,
+  InMemoryChannelAdapter,
 } from '../src';
 import type { Context, Next } from 'hono';
+import type { ExceptionFilter } from '../src';
 import { z } from 'zod';
 
 /* -------- helper -------- */
@@ -887,6 +898,51 @@ describe('HonoRouteBuilder', () => {
       await app.fetch(makeRequest('/cache-ttl'));
       expect(calls).toBe(2);
     });
+
+    it('@CacheInvalidate clears matching keys after a successful mutation', async () => {
+      let calls = 0;
+      @Controller('/cache-inv')
+      class CacheInvController {
+        @Get() @Public() @Cache({ ttl: 60_000, key: 'inv-list' })
+        list() { calls++; return { n: calls }; }
+
+        @Post() @Public() @CacheInvalidate('inv-list')
+        create() { return { ok: true }; }
+      }
+      const app = HonoRouteBuilder.build(CacheInvController);
+      const b1 = await (await app.fetch(makeRequest('/cache-inv'))).json() as { n: number; };
+      const b2 = await (await app.fetch(makeRequest('/cache-inv'))).json() as { n: number; };
+      expect(b1.n).toBe(1);
+      expect(b2.n).toBe(1); // served from cache
+
+      await app.fetch(makeRequest('/cache-inv', { method: 'POST' }));
+
+      const b3 = await (await app.fetch(makeRequest('/cache-inv'))).json() as { n: number; };
+      expect(b3.n).toBe(2); // invalidated → handler re-ran
+      expect(calls).toBe(2);
+    });
+
+    it('@CacheInvalidate does not clear non-matching keys', async () => {
+      let listCalls = 0;
+      let otherCalls = 0;
+      @Controller('/cache-ns')
+      class CacheNsController {
+        @Get('/a') @Public() @Cache({ ttl: 60_000, key: 'ns-a' })
+        listA() { listCalls++; return { n: listCalls }; }
+        @Get('/b') @Public() @Cache({ ttl: 60_000, key: 'ns-b' })
+        listB() { otherCalls++; return { n: otherCalls }; }
+        @Post() @Public() @CacheInvalidate('ns-a')
+        create() { return { ok: true }; }
+      }
+      const app = HonoRouteBuilder.build(CacheNsController);
+      await app.fetch(makeRequest('/cache-ns/a'));
+      await app.fetch(makeRequest('/cache-ns/b'));
+      await app.fetch(makeRequest('/cache-ns', { method: 'POST' }));
+      await app.fetch(makeRequest('/cache-ns/a'));
+      await app.fetch(makeRequest('/cache-ns/b'));
+      expect(listCalls).toBe(2);   // 'ns-a' invalidated
+      expect(otherCalls).toBe(1);  // 'ns-b' untouched
+    });
   });
 
   /* -------- HttpException -------- */
@@ -1028,5 +1084,302 @@ describe('@Private', () => {
     const app = HonoRouteBuilder.build(PrivController, undefined, { excludePrivate: true });
     const res = await app.fetch(makeRequest('/priv/open'));
     expect(res.status).toBe(200);
+  });
+});
+
+/* -------- describe() introspection -------- */
+
+describe('HonoRouteBuilder.describe', () => {
+  it('returns full metadata snapshot per route without instantiating', () => {
+    @Controller('/desc')
+    class DescController {
+      constructor() { throw new Error('must not be instantiated'); }
+      @Get() @Public() @Cache({ ttl: 1000, key: 'dlist' }) list() { return []; }
+      @Post('/:id') @RequireAuth() @Private() update() { return {}; }
+      @Sse('/stream') stream() { }
+    }
+
+    const routes = HonoRouteBuilder.describe(DescController);
+    expect(routes).toHaveLength(3);
+
+    const list = routes.find(r => r.handlerName === 'list')!;
+    expect(list).toMatchObject({
+      method: 'get', path: '/desc', isPublic: true, isPrivate: false,
+      cache: { ttl: 1000, key: 'dlist' }, sse: false, websocket: false,
+    });
+    expect(list.guards).toEqual([]);
+
+    const update = routes.find(r => r.handlerName === 'update')!;
+    expect(update.method).toBe('post');
+    expect(update.path).toBe('/desc/:id');
+    expect(update.isPrivate).toBe(true);
+    expect(update.guards.map(g => g.name)).toContain('AuthGuard');
+
+    const stream = routes.find(r => r.handlerName === 'stream')!;
+    expect(stream.sse).toBe(true);
+    expect(stream.websocket).toBe(false);
+  });
+
+  it('includes middleware names in execution order', () => {
+    async function classMw(_c: Context, next: Next) { await next(); }
+    async function methodMw(_c: Context, next: Next) { await next(); }
+
+    @Controller('/desc-mw')
+    @Middleware(classMw)
+    class DescMwController {
+      @Get() @Public() @Middleware(methodMw) list() { return []; }
+    }
+
+    const [route] = HonoRouteBuilder.describe(DescMwController);
+    expect(route!.middlewares).toEqual(['classMw', 'methodMw']);
+  });
+
+  it('returns empty array for non-controller classes', () => {
+    class NotAController { }
+    expect(HonoRouteBuilder.describe(NotAController)).toEqual([]);
+  });
+});
+
+/* -------- @Catch exception filters -------- */
+
+describe('@Catch / @UseFilters', () => {
+  class CustomError extends Error { }
+
+  it('method-level filter handles matching error type', async () => {
+    @Catch(CustomError)
+    class CustomErrorFilter implements ExceptionFilter {
+      catch(_e: unknown, c: Context) { return c.json({ handled: 'method' }, 418); }
+    }
+
+    @Controller('/flt')
+    class FltController {
+      @Get() @Public() @UseFilters(CustomErrorFilter)
+      boom() { throw new CustomError('nope'); }
+      @Get('/other') @Public() @UseFilters(CustomErrorFilter)
+      other() { throw new Error('generic'); }
+    }
+    const app = HonoRouteBuilder.build(FltController);
+    const res = await app.fetch(makeRequest('/flt'));
+    expect(res.status).toBe(418);
+    expect(await res.json()).toEqual({ handled: 'method' });
+    // non-matching type falls through to default 500
+    const res2 = await app.fetch(makeRequest('/flt/other'));
+    expect(res2.status).toBe(500);
+  });
+
+  it('class-level filter catches errors from any route', async () => {
+    @Catch()
+    class CatchAllFilter implements ExceptionFilter {
+      catch(e: unknown, c: Context) {
+        return c.json({ caught: (e as Error).message }, 409);
+      }
+    }
+
+    @Controller('/flt-all')
+    @UseFilters(CatchAllFilter)
+    class FltAllController {
+      @Get() @Public() boom() { throw new Error('all'); }
+    }
+    const app = HonoRouteBuilder.build(FltAllController);
+    const res = await app.fetch(makeRequest('/flt-all'));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ caught: 'all' });
+  });
+
+  it('filter returning void falls through to default HttpException handling', async () => {
+    @Catch(HttpException)
+    class VoidFilter implements ExceptionFilter {
+      catch(_e: unknown, _c: Context) { return undefined; }
+    }
+
+    @Controller('/flt-void')
+    @UseFilters(VoidFilter)
+    class FltVoidController {
+      @Get() @Public() boom() { throw HttpException.badRequest('bad input'); }
+    }
+    const app = HonoRouteBuilder.build(FltVoidController);
+    const res = await app.fetch(makeRequest('/flt-void'));
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: { code: string; }; };
+    expect(body.error.code).toBe('BAD_REQUEST');
+  });
+
+  it('filters are resolved via the container and support DI', async () => {
+    @Injectable() @Singleton()
+    class ErrorTagService { tag = 'svc-tag'; }
+
+    @Catch(CustomError)
+    @Injectable([ErrorTagService])
+    class DiFilter implements ExceptionFilter {
+      constructor(private tag: ErrorTagService) { }
+      catch(_e: unknown, c: Context) { return c.json({ tag: this.tag.tag }, 500); }
+    }
+
+    @Controller('/flt-di')
+    @UseFilters(DiFilter)
+    class FltDiController {
+      @Get() @Public() boom() { throw new CustomError(); }
+    }
+    const app = HonoRouteBuilder.build(FltDiController);
+    const res = await app.fetch(makeRequest('/flt-di'));
+    expect(await res.json()).toEqual({ tag: 'svc-tag' });
+  });
+});
+
+/* -------- @ChannelRoute -------- */
+
+describe('@ChannelRoute', () => {
+  it('SSE: subscribes, forwards published events, unsubscribes on abort', async () => {
+    const adapter = new InMemoryChannelAdapter();
+    channels.use(adapter);
+
+    @Controller('/chan')
+    class ChanController {
+      @Sse('/events') @Public() @ChannelRoute('room:x')
+      async events(_c: Context, _stream: unknown) { }
+    }
+    const app = HonoRouteBuilder.build(ChanController);
+    const res = await app.fetch(makeRequest('/chan/events'));
+
+    for (let i = 0; i < 50 && adapter.subscriberCount('room:x') === 0; i++) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    expect(adapter.subscriberCount('room:x')).toBe(1);
+
+    await channels.publish('room:x', 'ping', { n: 1 });
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    const text = new TextDecoder().decode(value);
+    expect(text).toContain('event: ping');
+    expect(text).toContain('"n":1');
+
+    await reader.cancel();
+    for (let i = 0; i < 50 && adapter.subscriberCount('room:x') !== 0; i++) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    expect(adapter.subscriberCount('room:x')).toBe(0);
+  });
+
+  it('WebSocket: wraps onOpen/onClose to subscribe and unsubscribe', async () => {
+    const adapter = new InMemoryChannelAdapter();
+    channels.use(adapter);
+    let captured: Record<string, ((e: unknown, ws: unknown) => unknown) | undefined> | undefined;
+    HonoRouteBuilder.configure({
+      webSocketUpgrader: (factory) => async (c: Context) => {
+        captured = (await factory(c)) as Record<string, (e: unknown, ws: unknown) => unknown>;
+        return c.text('upgraded');
+      },
+    });
+
+    @Controller('/chanws')
+    class ChanWsController {
+      @WebSocket('/room') @ChannelRoute('room:ws')
+      chat() { return {}; }
+    }
+    const app = HonoRouteBuilder.build(ChanWsController);
+    await app.fetch(makeRequest('/chanws/room'));
+    expect(captured).toBeDefined();
+
+    const sent: string[] = [];
+    const fakeWs = { send: (s: string) => { sent.push(s); }, readyState: 1 };
+    await captured!['onOpen']!({}, fakeWs);
+    expect(adapter.subscriberCount('room:ws')).toBe(1);
+
+    await channels.publish('room:ws', 'evt', { x: 1 });
+    expect(sent[0]).toContain('"event":"evt"');
+
+    await captured!['onClose']!({}, fakeWs);
+    expect(adapter.subscriberCount('room:ws')).toBe(0);
+
+    HonoRouteBuilder.configure({});
+    channels.use(new InMemoryChannelAdapter());
+  });
+});
+
+/* -------- @JwtAuth -------- */
+
+describe('@JwtAuth', () => {
+  const SECRET = 'test-secret-key';
+
+  it('accepts a valid token and exposes payload via User(c)', async () => {
+    const { sign } = await import('hono/jwt');
+
+    @Controller('/jwt')
+    class JwtController {
+      @Get('/me') @JwtAuth({ secret: SECRET })
+      me(c: Context) { return { user: User(c) }; }
+    }
+    const app = HonoRouteBuilder.build(JwtController);
+
+    const token = await sign({ sub: 'u-1', role: 'admin' }, SECRET);
+    const res = await app.fetch(makeRequest('/jwt/me', {
+      headers: { authorization: `Bearer ${token}` },
+    }));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { user: { sub: string; role: string; }; };
+    expect(body.user.sub).toBe('u-1');
+    expect(body.user.role).toBe('admin');
+  });
+
+  it('rejects missing and invalid tokens with 401', async () => {
+    @Controller('/jwt2')
+    class Jwt2Controller {
+      @Get() @JwtAuth({ secret: SECRET })
+      me() { return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(Jwt2Controller);
+
+    expect((await app.fetch(makeRequest('/jwt2'))).status).toBe(401);
+    expect((await app.fetch(makeRequest('/jwt2', {
+      headers: { authorization: 'Bearer not.a.token' },
+    }))).status).toBe(401);
+  });
+});
+
+/* -------- @Module / buildModule -------- */
+
+describe('@Module / buildModule', () => {
+  it('builds controllers from module + imported modules', async () => {
+    @Controller('/mod-a')
+    class ModAController {
+      @Get() @Public() list() { return { m: 'a' }; }
+    }
+    @Controller('/mod-b')
+    class ModBController {
+      @Get() @Public() list() { return { m: 'b' }; }
+    }
+
+    @Module({ controllers: [ModBController] })
+    class SharedModule { }
+
+    @Module({ imports: [SharedModule], controllers: [ModAController] })
+    class AppModule { }
+
+    const app = HonoRouteBuilder.buildModule(AppModule);
+    expect(await (await app.fetch(makeRequest('/mod-a'))).json()).toEqual({ m: 'a' });
+    expect(await (await app.fetch(makeRequest('/mod-b'))).json()).toEqual({ m: 'b' });
+  });
+
+  it('eagerly resolves providers — DI errors surface at build time', () => {
+    // ctor param but no @Injectable tokens → dependency resolution must fail fast
+    class DepWithMissing { constructor(_x: object) { } }
+
+    @Injectable([DepWithMissing])
+    class NeedsMissing { constructor(_d: DepWithMissing) { } }
+
+    @Module({ providers: [NeedsMissing] })
+    class BadModule { }
+
+    expect(() => HonoRouteBuilder.buildModule(BadModule)).toThrow(/no injection tokens/i);
+  });
+
+  it('throws for non-module classes and non-controller entries', () => {
+    class NotAModule { }
+    expect(() => HonoRouteBuilder.buildModule(NotAModule)).toThrow(/@Module/);
+
+    class NotAController { }
+    @Module({ controllers: [NotAController] })
+    class WeirdModule { }
+    expect(() => HonoRouteBuilder.buildModule(WeirdModule)).toThrow(/@Controller/);
   });
 });

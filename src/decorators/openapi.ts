@@ -39,6 +39,41 @@ export function ApiResponse(statusCode: number, description: string, schema?: Zo
   };
 }
 
+/* ================= API BODY ================= */
+
+/**
+ * Document the JSON request body. `required` defaults to whether the schema
+ * rejects `undefined` — schemas with `.optional()`/`.default()` are optional.
+ */
+export function ApiBody(
+  schema: ZodType,
+  options?: { required?: boolean; description?: string; }
+): MethodDec {
+  return (_value, context) => {
+    const name = String(context.name);
+    const existing = getMethodOpenApi(context, name);
+    setMethodOpenApi(context, name, { ...existing, body: { schema, ...options } });
+  };
+}
+
+/* ================= API QUERY ================= */
+
+/** Document a query parameter. `required` is auto-inferred like @ApiBody. */
+export function ApiQuery(
+  name: string,
+  schema: ZodType,
+  options?: { required?: boolean; description?: string; }
+): MethodDec {
+  return (_value, context) => {
+    const methodName = String(context.name);
+    const existing = getMethodOpenApi(context, methodName);
+    setMethodOpenApi(context, methodName, {
+      ...existing,
+      query: { ...(existing.query ?? {}), [name]: { schema, ...options } },
+    });
+  };
+}
+
 /* ================= API DEPRECATED ================= */
 
 export function ApiDeprecated(): MethodDec {

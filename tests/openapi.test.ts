@@ -11,8 +11,9 @@ import {
   RequireAuth,
   RequireRole,
 } from '../src';
-import { ApiDoc, ApiTags, ApiResponse, ApiDeprecated } from '../src';
+import { ApiDoc, ApiTags, ApiResponse, ApiDeprecated, ApiBody, ApiQuery } from '../src';
 import { OpenAPIGenerator } from '../src';
+import { z } from 'zod';
 
 /* ================= CONTROLLERS ================= */
 
@@ -231,5 +232,38 @@ describe('OpenAPIGenerator.generate', () => {
       const servers = spec['servers'] as Array<{ url: string }>;
       expect(servers[0]?.url).toBe('https://api.example.com');
     });
+  });
+});
+
+/* -------- @ApiBody / @ApiQuery -------- */
+
+describe('@ApiBody and @ApiQuery', () => {
+  const CreateSchema = z.object({ name: z.string(), qty: z.number() });
+
+  @Controller('/api-doc')
+  class DocController {
+    @Post() @Public()
+    @ApiBody(CreateSchema, { description: 'payload' })
+    @ApiQuery('dry', z.boolean().optional())
+    @ApiQuery('strict', z.string())
+    create() { }
+  }
+
+  it('emits requestBody with JSON schema and inferred required', () => {
+    const o = op(generate(DocController), '/api-doc', 'post');
+    const body = o['requestBody'] as Record<string, unknown>;
+    expect(body['required']).toBe(true);
+    const schema = (body['content'] as Record<string, { schema: { properties: object; }; }>)['application/json']!.schema;
+    expect(Object.keys(schema.properties)).toEqual(['name', 'qty']);
+  });
+
+  it('emits query parameters with inferred required', () => {
+    const o = op(generate(DocController), '/api-doc', 'post');
+    const params = o['parameters'] as Array<{ name: string; in: string; required: boolean; }>;
+    const dry = params.find(p => p.name === 'dry')!;
+    const strict = params.find(p => p.name === 'strict')!;
+    expect(dry.in).toBe('query');
+    expect(dry.required).toBe(false);   // .optional() schema → not required
+    expect(strict.required).toBe(true);
   });
 });

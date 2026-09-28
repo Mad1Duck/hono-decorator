@@ -26,19 +26,25 @@ export const METADATA_KEYS = {
   METHOD_MIDDLEWARES: Symbol('methodMiddlewares'),
   VALIDATION: Symbol('validation'),
   CACHE: Symbol('cache'),
+  CACHE_INVALIDATE: Symbol('cacheInvalidate'),
   RATE_LIMIT: Symbol('rateLimit'),
   OPENAPI: Symbol('openapi'),
   CLASS_OPENAPI: Symbol('classOpenapi'),
   CUSTOM: Symbol('custom'),
   SSE_ROUTE: Symbol('sseRoute'),
   WEBSOCKET_ROUTE: Symbol('websocketRoute'),
+  CHANNEL_ROUTE: Symbol('channelRoute'),
   IS_PUBLIC: Symbol('isPublic'),
   IS_PRIVATE: Symbol('isPrivate'),
+  CATCH: Symbol('catch'),
+  EXCEPTION_FILTERS: Symbol('exceptionFilters'),
+  METHOD_EXCEPTION_FILTERS: Symbol('methodExceptionFilters'),
   INJECTABLE: Symbol('injectable'),
   SINGLETON: Symbol('singleton'),
   REQUEST_SCOPED: Symbol('requestScoped'),
   STATELESS: Symbol('stateless'),
   INJECT_PARAMS: Symbol('injectParams'),
+  MODULE: Symbol('module'),
 } as const;
 
 /* ================= HELPERS ================= */
@@ -75,6 +81,17 @@ export interface ControllerMetadata {
   routes: RouteMetadata[];
 }
 
+/* ================= MODULE ================= */
+
+export interface ModuleMetadata {
+  /** Controller classes owned by this module. */
+  controllers?: unknown[];
+  /** Provider classes — resolved eagerly at buildModule() for fail-fast DI. */
+  providers?: unknown[];
+  /** Other @Module classes whose controllers/providers are included. */
+  imports?: unknown[];
+}
+
 /* ================= GUARD ================= */
 
 export interface GuardMetadata {
@@ -104,6 +121,8 @@ export interface OpenAPIMetadata {
   tags?: string[];
   deprecated?: boolean;
   responses?: Record<number, { description?: string; schema?: ZodType; }>;
+  body?: { schema: ZodType; required?: boolean; description?: string; };
+  query?: Record<string, { schema: ZodType; required?: boolean; description?: string; }>;
 }
 
 /* ================= CACHE ================= */
@@ -112,6 +131,11 @@ export interface CacheMetadata {
   ttl: number;
   key?: string;
 }
+
+/* ================= CHANNEL ROUTE ================= */
+
+/** Channel pattern for @ChannelRoute — static or resolved per request. */
+export type ChannelRouteMetadata = string | ((c: Context) => string);
 
 /* ================= RATE LIMIT ================= */
 

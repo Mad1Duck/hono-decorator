@@ -13,7 +13,8 @@ export class SseChannelClient implements ChannelClient {
   }
 
   isAlive(): boolean {
-    return !this.stream.closed;
+    const s = this.stream as SseStreamLike & { aborted?: boolean; };
+    return !s.closed && !s.aborted;
   }
 }
 

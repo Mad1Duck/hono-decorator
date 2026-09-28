@@ -4,6 +4,8 @@ import { streamSSE } from 'hono/streaming';
 import { ZodError } from 'zod';
 
 import { container } from './container';
+import { defaultCacheAdapter } from './cache';
+import type { CacheAdapter } from './cache';
 import { HttpException } from './http-exception';
 import { createRequestContext, runInRequestContext } from './request-context';
 import { METADATA_KEYS } from '../decorators/metadata';
@@ -14,8 +16,14 @@ import type {
   GuardMetadata,
   RateLimitMetadata,
   CacheMetadata,
+  ChannelRouteMetadata,
+  ModuleMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
+import type { ExceptionFilter, ExceptionFilterConstructor } from '../decorators/filters';
+import { channels } from '../channels/registry';
+import { SseChannelClient, WsChannelClient } from '../channels/clients';
+import type { ChannelClient, WsLike } from '../channels/types';
 import type { ConcreteConstructor, ControllerConstructor, ControllerInstance } from './types';
 
 /* ================= HELPERS ================= */
@@ -69,6 +77,30 @@ export interface RouteBuilderConfig {
   trailingSlash?: 'ignore' | 'strip' | 'add';
   strictValidation?: 'warn' | 'error' | 'off';
   exposeStack?: boolean | 'development';
+  /** Pluggable store for @Cache / @CacheInvalidate — defaults to in-memory. */
+  cacheAdapter?: CacheAdapter;
+}
+
+/** Serializable snapshot of a controller route's metadata — see describe(). */
+export interface RouteDescription {
+  method: RouteMetadata['method'];
+  /** Full route path: controller basePath + route path. */
+  path: string;
+  handlerName: string;
+  platform?: 'mobile' | 'web' | 'all';
+  guards: GuardMetadata[];
+  isPublic: boolean;
+  isPrivate: boolean;
+  /** Function names of class-level + method-level middleware, in execution order. */
+  middlewares: string[];
+  rateLimit?: RateLimitMetadata;
+  cache?: CacheMetadata;
+  /** Prefix patterns invalidated when this handler succeeds (@CacheInvalidate). */
+  cacheInvalidate?: string[];
+  sse: boolean;
+  websocket: boolean;
+  /** @ChannelRoute pattern — a function means it is resolved per request. */
+  channelRoute?: ChannelRouteMetadata;
 }
 
 export type { RequestLogger, RequestLogEntry };
@@ -144,6 +176,109 @@ export class HonoRouteBuilder {
     return app;
   }
 
+  /**
+   * Read-only introspection of a controller's routes — pure metadata read, no
+   * instantiation, no app building. Useful for debugging, tests, and tooling.
+   *
+   * @example
+   * const routes = HonoRouteBuilder.describe(UserController);
+   * // [{ method: 'get', path: '/users', handlerName: 'list', guards: [...], ... }]
+   */
+  static describe<T>(ControllerClass: ControllerConstructor<T>): RouteDescription[] {
+    const meta = classMeta(ControllerClass as unknown as Function);
+    const controllerMeta = meta?.[METADATA_KEYS.CONTROLLER] as { basePath: string; } | undefined;
+    if (!controllerMeta) return [];
+
+    const routes = (meta?.[METADATA_KEYS.ROUTES] as RouteMetadata[] | undefined) ?? [];
+    const allGuards = (meta?.[METADATA_KEYS.GUARDS] as Record<string, GuardMetadata[]> | undefined) ?? {};
+    const allRateLimits = (meta?.[METADATA_KEYS.RATE_LIMIT] as Record<string, RateLimitMetadata> | undefined) ?? {};
+    const allCache = (meta?.[METADATA_KEYS.CACHE] as Record<string, CacheMetadata> | undefined) ?? {};
+    const allInvalidate = (meta?.[METADATA_KEYS.CACHE_INVALIDATE] as Record<string, string[]> | undefined) ?? {};
+    const allMethodMws = (meta?.[METADATA_KEYS.METHOD_MIDDLEWARES] as Record<string, HonoMiddlewareFn[]> | undefined) ?? {};
+    const classMws = (meta?.[METADATA_KEYS.MIDDLEWARES] as HonoMiddlewareFn[] | undefined) ?? [];
+    const isPublicMap = (meta?.[METADATA_KEYS.IS_PUBLIC] as Record<string, boolean> | undefined) ?? {};
+    const isPrivateMap = (meta?.[METADATA_KEYS.IS_PRIVATE] as Record<string, boolean> | undefined) ?? {};
+    const sseMap = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
+    const wsMap = (meta?.[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
+    const channelMap = (meta?.[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, ChannelRouteMetadata> | undefined) ?? {};
+
+    const names = (mws: HonoMiddlewareFn[]) => mws.map(mw => mw.name || 'anonymous');
+
+    return routes.map(route => ({
+      method: route.method,
+      path: `${controllerMeta.basePath}${route.path}`,
+      handlerName: route.handlerName,
+      platform: route.platform,
+      guards: allGuards[route.handlerName] ?? [],
+      isPublic: isPublicMap[route.handlerName] ?? false,
+      isPrivate: isPrivateMap[route.handlerName] ?? false,
+      middlewares: [...names(classMws), ...names(allMethodMws[route.handlerName] ?? [])],
+      rateLimit: allRateLimits[route.handlerName],
+      cache: allCache[route.handlerName],
+      cacheInvalidate: allInvalidate[route.handlerName],
+      sse: sseMap[route.handlerName] ?? false,
+      websocket: wsMap[route.handlerName] ?? false,
+      channelRoute: channelMap[route.handlerName],
+    }));
+  }
+
+  /**
+   * Build a Hono app from an @Module class — collects controllers recursively
+   * through `imports` (deduped) and eagerly resolves `providers` for fail-fast
+   * DI validation. Providers decorated @RequestScoped are skipped eagerly —
+   * they are resolved per request as usual.
+   */
+  static buildModule(
+    ModuleClass: Function,
+    platform?: 'mobile' | 'web',
+    options?: { excludePrivate?: boolean; }
+  ): Hono {
+    const { controllers, providers } = this.collectModule(ModuleClass, new Set());
+
+    for (const provider of providers) {
+      const cls = provider as ConcreteConstructor;
+      if (classMeta(cls)?.[METADATA_KEYS.REQUEST_SCOPED]) continue;
+      container.resolve(cls);
+    }
+
+    const app = new Hono();
+    for (const ctrl of controllers) {
+      const cls = ctrl as ControllerConstructor;
+      if (!classMeta(cls as unknown as Function)?.[METADATA_KEYS.CONTROLLER]) {
+        throw new Error(
+          `[hono-forge] buildModule: '${(cls as unknown as Function).name}' in module ` +
+          `'${ModuleClass.name}' is not decorated with @Controller.`
+        );
+      }
+      app.route('/', this.build(cls, platform, options));
+    }
+    return app;
+  }
+
+  private static collectModule(
+    ModuleClass: Function,
+    seen: Set<Function>
+  ): { controllers: unknown[]; providers: unknown[]; } {
+    if (seen.has(ModuleClass)) return { controllers: [], providers: [] };
+    seen.add(ModuleClass);
+
+    const modMeta = classMeta(ModuleClass)?.[METADATA_KEYS.MODULE] as ModuleMetadata | undefined;
+    if (!modMeta) {
+      throw new Error(
+        `[hono-forge] buildModule: '${ModuleClass.name}' is not decorated with @Module.`
+      );
+    }
+
+    const controllers = [...(modMeta.controllers ?? [])];
+    const providers = [...(modMeta.providers ?? [])];
+    for (const imported of modMeta.imports ?? []) {
+      const sub = this.collectModule(imported as Function, seen);
+      controllers.push(...sub.controllers);
+      providers.push(...sub.providers);
+    }
+    return { controllers, providers };
+  }
+
   private static registerRoute(
     app: Hono,
     route: RouteMetadata,
@@ -163,6 +298,8 @@ export class HonoRouteBuilder {
         try {
           return await mw(c, next);
         } catch (error: unknown) {
+          const filtered = await applyFilters(error, c);
+          if (filtered) return filtered;
           if (error instanceof ZodError) {
             return c.json(
               { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: error.issues } },
@@ -202,10 +339,28 @@ export class HonoRouteBuilder {
 
     const isPublicMap = (meta?.[METADATA_KEYS.IS_PUBLIC] as Record<string, boolean> | undefined) ?? {};
 
+    // Exception filters: method-level run before class-level.
+    const classFilters = (meta?.[METADATA_KEYS.EXCEPTION_FILTERS] as ExceptionFilterConstructor[] | undefined) ?? [];
+    const allMethodFilters = (meta?.[METADATA_KEYS.METHOD_EXCEPTION_FILTERS] as Record<string, ExceptionFilterConstructor[]> | undefined) ?? {};
+    const filterClasses = [...(allMethodFilters[handlerName] ?? []), ...classFilters];
+
+    const applyFilters = async (error: unknown, c: Context): Promise<Response | undefined> => {
+      for (const FilterClass of filterClasses) {
+        const types = (classMeta(FilterClass)?.[METADATA_KEYS.CATCH] as Function[] | undefined) ?? [];
+        const matches = types.length === 0 || types.some(t => typeof t === 'function' && error instanceof (t as new () => object));
+        if (!matches) continue;
+        const filter = container.resolve(FilterClass as unknown as ConcreteConstructor<ExceptionFilter>);
+        const result = await filter.catch(error, c);
+        if (result !== undefined) return result;
+      }
+      return undefined;
+    };
+
     const allCache = (meta?.[METADATA_KEYS.CACHE] as Record<string, CacheMetadata> | undefined) ?? {};
     const cacheMeta = allCache[handlerName];
-    // Route-level response cache — per route, keyed by custom key + path + query.
-    const routeCache = cacheMeta ? new Map<string, { value: unknown; expires: number; }>() : null;
+    const allInvalidate = (meta?.[METADATA_KEYS.CACHE_INVALIDATE] as Record<string, string[]> | undefined) ?? {};
+    const invalidatePatterns = allInvalidate[handlerName];
+    const cacheAdapter = this.config.cacheAdapter ?? defaultCacheAdapter;
 
     const routeLabel = `${method.toUpperCase()} ${basePath}${path}`;
 
@@ -273,6 +428,11 @@ export class HonoRouteBuilder {
     const requestLogger = this.config.requestLogger;
     const onRequestStart = this.config.onRequestStart;
 
+    const allChannelRoutes = (meta?.[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, ChannelRouteMetadata> | undefined) ?? {};
+    const channelPattern = allChannelRoutes[handlerName];
+    const resolveChannel = (c: Context) =>
+      typeof channelPattern === 'function' ? channelPattern(c) : channelPattern;
+
     /* ----- SSE Route ----- */
     const allSse = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
     if (allSse[handlerName]) {
@@ -293,6 +453,19 @@ export class HonoRouteBuilder {
               await fn.call(inst, c, stream);
             })
           );
+
+          // @ChannelRoute: subscribe this stream and hold it open until the
+          // client disconnects.
+          if (channelPattern) {
+            const channel = resolveChannel(c)!;
+            const client = new SseChannelClient(crypto.randomUUID(), stream);
+            await channels.subscribe(channel, client);
+            try {
+              await new Promise<void>((resolve) => stream.onAbort(() => resolve()));
+            } finally {
+              await channels.unsubscribe(channel, client.id);
+            }
+          }
 
           if (requestLogger) {
             await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
@@ -328,7 +501,27 @@ export class HonoRouteBuilder {
         const inst = runInRequestContext(createRequestContext(traceId), getController);
         const fn = inst[handlerName];
         if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
-        const result = fn.call(inst, c);
+        const result = (await fn.call(inst, c)) as Record<string, unknown> | undefined;
+
+        // @ChannelRoute: wrap the returned WS event callbacks so connect/disconnect
+        // automatically subscribe/unsubscribe a channel client.
+        if (channelPattern) {
+          const channel = resolveChannel(c)!;
+          const events = result ?? {};
+          let channelClient: ChannelClient | undefined;
+          const userOnOpen = events['onOpen'] as ((e: unknown, ws: unknown) => unknown) | undefined;
+          const userOnClose = events['onClose'] as ((e: unknown, ws: unknown) => unknown) | undefined;
+          events['onOpen'] = async (evt: unknown, ws: unknown) => {
+            channelClient = new WsChannelClient(crypto.randomUUID(), ws as WsLike);
+            await channels.subscribe(channel, channelClient);
+            await userOnOpen?.(evt, ws);
+          };
+          events['onClose'] = async (evt: unknown, ws: unknown) => {
+            if (channelClient) await channels.unsubscribe(channel, channelClient.id);
+            await userOnClose?.(evt, ws);
+          };
+          return events;
+        }
 
         if (requestLogger) {
           await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 101, durationMs: Date.now() - startMs, traceId });
@@ -352,17 +545,16 @@ export class HonoRouteBuilder {
       if (onRequestStart) await onRequestStart({ method: c.req.method, path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
 
       let cacheKey: string | undefined;
-      if (routeCache) {
+      if (cacheMeta) {
         const url = new URL(c.req.url);
-        cacheKey = `${cacheMeta!.key ?? handlerName}:${url.pathname}${url.search}`;
-        const hit = routeCache.get(cacheKey);
-        if (hit && hit.expires > Date.now()) {
+        cacheKey = `${cacheMeta.key ?? handlerName}:${url.pathname}${url.search}`;
+        const hit = await cacheAdapter.get(cacheKey);
+        if (hit) {
           if (requestLogger) {
             await requestLogger({ method: c.req.method, path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
           }
           return c.json(hit.value);
         }
-        if (hit) routeCache.delete(cacheKey);
       }
 
       const ctx = createRequestContext(traceId);
@@ -374,18 +566,19 @@ export class HonoRouteBuilder {
             if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
 
             const result = await fn.call(inst, c);
-            if (result instanceof Response) return result;
-            if (routeCache && cacheKey !== undefined && result !== undefined) {
-              routeCache.set(cacheKey, { value: result, expires: Date.now() + cacheMeta!.ttl });
-              if (routeCache.size > 1000) {
-                const now = Date.now();
-                for (const [k, v] of routeCache) {
-                  if (v.expires <= now) routeCache.delete(k);
-                }
+            if (invalidatePatterns) {
+              for (const pattern of invalidatePatterns) {
+                await cacheAdapter.deletePattern(pattern);
               }
+            }
+            if (result instanceof Response) return result;
+            if (cacheMeta && cacheKey !== undefined && result !== undefined) {
+              await cacheAdapter.set(cacheKey, result, cacheMeta.ttl);
             }
             return result !== undefined ? c.json(result) : c.body(null);
           } catch (error: unknown) {
+            const filtered = await applyFilters(error, c);
+            if (filtered) return filtered;
             if (error instanceof ZodError) {
               return c.json(
                 { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: error.issues } },
