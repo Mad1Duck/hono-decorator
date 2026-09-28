@@ -505,6 +505,8 @@ app.route('/', HonoRouteBuilder.build(UserController, 'mobile'));
 
 **Return values:** a plain value is auto-serialized with `c.json()`; `undefined` returns an empty `200`. Returning a `Response` object (`c.json()`, `c.redirect()`, `c.html()`, raw `new Response()`) passes it through untouched.
 
+**Trailing slash:** `HonoRouteBuilder.configure({ trailingSlash: 'strip' | 'add' })` redirects non-conforming URLs (`301` for GET/HEAD, `308` for other methods so the method and body are preserved). `'ignore'` (default) registers both variants without redirecting.
+
 ---
 
 ## Context helpers
@@ -566,7 +568,9 @@ async list(c: Context) {
 | `await UploadedFiles(c, 'field?')` | `File[]` | Multiple files |
 | `await FormBody(c)` | `FormData` | Raw form data |
 | `Req(c)` | `HonoRequest` | Hono request object |
-| `Ctx(c)` / `Res(c)` | `Context` | Full context (for redirect, set-cookie, etc.) |
+| `Ctx(c)` | `Context` | Full context (for redirect, set-cookie, etc.) |
+
+> `Res(c)` is a deprecated alias of `Ctx(c)` — it returns the `Context`, not a `Response`.
 
 ### Validated shorthands
 
@@ -635,7 +639,7 @@ HonoRouteBuilder.configure({
 });
 ```
 
-> Errors with `"Unauthorized"` → `401`. Errors with `"Forbidden"` → `403`. Return `false` → `403`.
+> `HttpException` is passed through at its own status code (e.g. `throw HttpException.unauthorized('Token expired')` → `401`). For plain `Error`s, a message containing `"Unauthorized"` → `401`, `"Forbidden"` → `403`. Return `false` → `403`. Anything else → `500`.
 
 ### Guard decorators
 
@@ -922,7 +926,7 @@ class ChatController {
 
 ```ts
 channels.subscribe(channel, client)      // add a client to a channel
-channels.unsubscribe(channel, clientId)  // remove a client
+channels.unsubscribe(channel, clientId)  // remove every connection with that id
 channels.publish(channel, event, data)   // broadcast to all subscribers
 channels.use(adapter)                    // swap adapter at startup
 ```
@@ -949,7 +953,7 @@ info(c: Context) {
 }
 ```
 
-IP resolution order: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` (first) → `'unknown'`.
+IP resolution order: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` (first) → `'unknown'`. These headers are trusted unconditionally — only rely on `Ip()` for rate limiting or security decisions behind a proxy that strips client-supplied headers.
 
 Device types: `'mobile' | 'tablet' | 'desktop' | 'bot'`.
 
