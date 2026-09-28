@@ -1,8 +1,13 @@
 export * from './cache';
+export * from './config';
 export * from './container';
+export * from './events';
 export * from './http-exception';
 export * from './logger';
 export * from './rate-limit';
+export { getRequestContext, getContext } from './request-context';
+export type { RequestContext as RequestScopeContext } from './request-context';
 export * from './route-builder';
+export * from './scheduler';
 export * from './testing';
 export * from './types';

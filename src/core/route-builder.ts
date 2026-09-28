@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import type { ContentfulStatusCode, StatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
 
 import { container } from './container';
@@ -23,6 +24,7 @@ import type {
   IdempotentMetadata,
   HeadersMetadata,
   RedirectMetadata,
+  ResponseStatusMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
 import type { SseOptions } from '../decorators/sse';
@@ -540,7 +542,7 @@ export class HonoRouteBuilder {
 
           try {
             if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
-            const ctx = createRequestContext(traceId);
+            const ctx = createRequestContext(traceId, c);
             await runInRequestContext(ctx, () =>
               container.runInScope(async () => {
                 const inst = getController();
@@ -597,7 +599,7 @@ export class HonoRouteBuilder {
 
         // Resolved inside a request context but outside runInScope — WS handlers
         // return event callbacks immediately while the socket stays open.
-        const inst = runInRequestContext(createRequestContext(traceId), getController);
+        const inst = runInRequestContext(createRequestContext(traceId, c), getController);
         const fn = inst[handlerName];
         if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
         const result = (await fn.call(inst, c)) as Record<string, unknown> | undefined;
@@ -643,6 +645,8 @@ export class HonoRouteBuilder {
     const headerMeta = allHeaders[handlerName];
     const allRedirect = (meta?.[METADATA_KEYS.REDIRECT] as Record<string, RedirectMetadata> | undefined) ?? {};
     const redirectMeta = allRedirect[handlerName];
+    const allStatus = (meta?.[METADATA_KEYS.RESPONSE_STATUS] as Record<string, ResponseStatusMetadata> | undefined) ?? {};
+    const statusMeta = allStatus[handlerName];
     const allOpenApi = (meta?.[METADATA_KEYS.OPENAPI] as Record<string, OpenAPIMetadata> | undefined) ?? {};
     const deprecatedMeta = allOpenApi[handlerName]?.deprecated;
 
@@ -700,7 +704,7 @@ export class HonoRouteBuilder {
       }
 
       const execute = () => {
-        const ctx = createRequestContext(traceId);
+        const ctx = createRequestContext(traceId, c);
         return runInRequestContext(ctx, () =>
           container.runInScope(async () => {
           try {
@@ -715,10 +719,14 @@ export class HonoRouteBuilder {
               }
             }
             if (result instanceof Response) return result;
+            if (statusMeta?.ignoreBody) return c.body(null, statusMeta.status as StatusCode);
             if (cacheMeta && cacheKey !== undefined && result !== undefined) {
               await cacheAdapter.set(cacheKey, result, cacheMeta.ttl);
             }
-            return result !== undefined ? c.json(result) : c.body(null);
+            if (result !== undefined) {
+              return statusMeta ? c.json(result, statusMeta.status as ContentfulStatusCode) : c.json(result);
+            }
+            return c.body(null, statusMeta?.status as StatusCode | undefined);
           } catch (error: unknown) {
             const filtered = await applyFilters(error, c);
             if (filtered) return filtered;

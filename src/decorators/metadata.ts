@@ -31,6 +31,9 @@ export const METADATA_KEYS = {
   SINGLE_FLIGHT: Symbol('singleFlight'),
   HEADERS: Symbol('headers'),
   REDIRECT: Symbol('redirect'),
+  RESPONSE_STATUS: Symbol('responseStatus'),
+  ON_EVENT: Symbol('onEvent'),
+  SCHEDULE: Symbol('schedule'),
   RATE_LIMIT: Symbol('rateLimit'),
   OPENAPI: Symbol('openapi'),
   CLASS_OPENAPI: Symbol('classOpenapi'),
@@ -158,6 +161,23 @@ export interface RedirectMetadata {
   location: string;
   status: 301 | 302 | 303 | 307 | 308;
 }
+
+/** @Status / @NoContent — default status code for non-Response results. */
+export interface ResponseStatusMetadata {
+  status: number;
+  /** @NoContent — body is always empty regardless of the handler result. */
+  ignoreBody?: boolean;
+}
+
+/** @Interval metadata — scheduled service method. */
+export interface ScheduleMetadata {
+  everyMs: number;
+  /** Run once immediately at scheduler start. */
+  immediate?: boolean;
+}
+
+/** @OnEvent — event names listened to by a method (repeatable). */
+export type OnEventMetadata = string[];
 
 /* ================= RATE LIMIT ================= */
 

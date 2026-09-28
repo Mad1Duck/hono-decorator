@@ -1,5 +1,5 @@
 import { METADATA_KEYS } from './metadata';
-import type { CacheMetadata, HeadersMetadata, IdempotentMetadata, RedirectMetadata } from './metadata';
+import type { CacheMetadata, HeadersMetadata, IdempotentMetadata, RedirectMetadata, ResponseStatusMetadata } from './metadata';
 import { HttpException } from '../core/http-exception';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,6 +108,28 @@ export function Redirect(
     const all = (context.metadata[METADATA_KEYS.REDIRECT] as Record<string, RedirectMetadata> | undefined) ?? {};
     all[String(context.name)] = { location, status };
     context.metadata[METADATA_KEYS.REDIRECT] = all;
+  };
+}
+
+/**
+ * Default status code for this route's response — `@Post() @Status(201)`
+ * returns 201 without `c.json(result, 201)` in the handler. A `Response`
+ * returned by the handler still wins (passthrough is not overridden).
+ */
+export function Status(status: number): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.RESPONSE_STATUS] as Record<string, ResponseStatusMetadata> | undefined) ?? {};
+    all[String(context.name)] = { status };
+    context.metadata[METADATA_KEYS.RESPONSE_STATUS] = all;
+  };
+}
+
+/** `204 No Content` — the response body is always empty. */
+export function NoContent(): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.RESPONSE_STATUS] as Record<string, ResponseStatusMetadata> | undefined) ?? {};
+    all[String(context.name)] = { status: 204, ignoreBody: true };
+    context.metadata[METADATA_KEYS.RESPONSE_STATUS] = all;
   };
 }
 

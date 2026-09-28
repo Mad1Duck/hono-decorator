@@ -10,8 +10,12 @@ export function Controller(
 ): (value: Function, context: ClassDecoratorContext) => void {
   return (_value, context) => {
     const platform = options?.platform;
-    const version = options?.version ?? 'v1';
-    const fullPath = platform ? `/${platform}/${version}${basePath}` : basePath;
+    // Version prefix: explicit `version` always applies ('v2' or '/v2' → '/v2').
+    // Platform routes default to v1 for backwards compatibility; plain
+    // controllers only get a version prefix when one is given explicitly.
+    const version = options?.version ?? (platform ? 'v1' : undefined);
+    const versionPrefix = version ? `/${version.replace(/^\/+|\/+$/g, '')}` : '';
+    const fullPath = platform ? `/${platform}${versionPrefix}${basePath}` : `${versionPrefix}${basePath}`;
 
     const metadata: ControllerMetadata = {
       basePath: fullPath,

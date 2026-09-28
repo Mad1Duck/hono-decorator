@@ -21,6 +21,11 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Error handling** — pluggable `onError` for unhandled route errors
 - **Interceptors** — `@Retry`, `@Timeout`, `@Transform`, `@Cache`, `@TrackMetrics`
 - **Operational helpers** — `mountHealth` health checks, `gracefulShutdown`, `printRoutes` route table, `LOGGER` DI token
+- **Typed config** — `registerConfig` Zod-validates env once at boot, injectable via `CONFIG` token
+- **Event bus** — `@OnEvent` + `events.emit` in-process pub/sub with full DI
+- **Scheduling** — `@Interval` service jobs with overlap guard and clean shutdown
+- **Resilience** — `@CircuitBreaker` fail-fast for upstream calls
+- **API versioning** — `@Controller(path, { version: 'v2' })` per-controller prefix
 
 ## Install
 
@@ -363,6 +368,31 @@ process.on('SIGTERM', async () => {
 });
 ```
 
+### Typed config — `registerConfig` / `CONFIG`
+
+Validate `process.env` once at boot and inject the result as a typed object — a bad deploy fails fast with every invalid field listed, instead of `undefined` leaking into runtime:
+
+```ts
+import { registerConfig, getConfig, CONFIG } from 'hono-forge';
+import { z } from 'zod';
+
+const EnvSchema = z.object({
+  PORT: z.coerce.number().default(3000),
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(16),
+});
+
+export const env = registerConfig(EnvSchema); // throws at boot if invalid
+
+@Injectable([CONFIG])
+class DbService {
+  constructor(private cfg: z.infer<typeof EnvSchema>) {}
+}
+
+// Outside DI:
+const cfg = getConfig<z.infer<typeof EnvSchema>>();
+```
+
 ### Table column schemas with `defineSchemas`
 
 `defineSchemas` generates a consistent `{ select, insert, update }` schema set from any two Zod schemas. It works with `drizzle-zod`, `zod-prisma`, or hand-written schemas.
@@ -508,7 +538,13 @@ async list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) {
 @Controller('/users', { platform: 'web', version: 'v2' })
 // registers routes under /web/v2/users
 class UserController {}
+
+@Controller('/users', { version: 'v2' })
+// registers routes under /v2/users — version works without platform
+class UserControllerV2 {}
 ```
+
+`version` prefixes every route in the controller — combine multiple versioned controllers in one app to run v1 and v2 side by side. Without `platform`/`version` the base path is used as-is.
 
 ### HTTP method decorators
 
@@ -524,6 +560,18 @@ class UserController {}
 ```
 
 Each accepts optional `{ platform?: 'web' | 'mobile' | 'all', isPrivate?: boolean }`.
+
+### Response status — `@Status` / `@NoContent`
+
+```ts
+@Post() @Status(201)
+create() { return { id: '1' }; }        // → 201, body intact
+
+@Delete('/:id') @NoContent()
+remove() { /* anything */ }             // → 204, empty body
+```
+
+A `Response` returned by the handler still wins — `@Status` only applies to plain return values.
 
 ### Building routes
 
@@ -579,6 +627,20 @@ getOne(c: Context) {
 async list(c: Context) {
   const q = await Query(c, FilterSchema);  // validated query object
   return this.svc.getAll(q);
+}
+```
+
+### `getContext()` — request data without prop-drilling
+
+Inside any code reachable from a request (services, repositories, event handlers), `getContext()` returns the active Hono `Context`; `getRequestContext()` returns the lower-level scope (`traceId`, memoize cache, DI scope). Both return `undefined` outside a request.
+
+```ts
+@Injectable()
+class AuditRepo {
+  log(action: string) {
+    const c = getContext();
+    return this.db.insert({ action, ip: extractIp(c), userId: User(c)?.id });
+  }
 }
 ```
 
@@ -1380,6 +1442,72 @@ import type { TransactionExecutor } from 'hono-forge';
 const prismaExecutor: TransactionExecutor<PrismaClient> =
   (db, run) => db.$transaction(run);
 ```
+
+### `@CircuitBreaker`
+
+Fail fast when an upstream is down instead of piling up timeouts. After `failureThreshold` consecutive failures the circuit opens — calls throw `CircuitOpenError` (503) instantly. After `resetAfterMs` one probe goes through: success closes the circuit, failure re-opens it. State is per instance+method.
+
+```ts
+@Injectable()
+class PaymentGateway {
+  @CircuitBreaker({ failureThreshold: 5, resetAfterMs: 30_000 })
+  async charge(amount: number) { return this.http.post('/charge', { amount }); }
+}
+```
+
+---
+
+## Events & scheduling
+
+### In-process events — `@OnEvent` + `events.emit`
+
+Decouple side-effects from controllers — emit domain events and let services react without the caller knowing about them:
+
+```ts
+import { events, startEventBus, OnEvent } from 'hono-forge';
+
+@Post()
+async create(c: Context) {
+  const user = await this.svc.create(await Body(c));
+  await events.emit('user.created', { id: user.id }); // never throws
+  return user;
+}
+
+@Injectable() @Singleton()
+class MailService {
+  @OnEvent('user.created')            // repeatable — listen to multiple events
+  async sendWelcome(payload: { id: string }) { /* ... */ }
+}
+
+const stopEvents = startEventBus(MailService); // or pass a @Module class
+// wire teardown: gracefulShutdown({ onShutdown: stopEvents })
+```
+
+- Listeners resolve through the DI container per emit (full DI support).
+- Each listener is isolated — a throwing one is logged via `LOGGER`, others still run; `emit` never throws.
+- `@RequestScoped` listeners have no scope outside a request — keep listeners singleton/transient.
+
+### Scheduled jobs — `@Interval` + `startScheduler`
+
+```ts
+import { startScheduler, Interval } from 'hono-forge';
+
+@Injectable() @Singleton()
+class Janitor {
+  @Interval(60_000)                    // every minute
+  sweep() { /* cleanup expired tokens */ }
+
+  @Interval(30_000, { immediate: true }) // also runs once at startup
+  warmCache() { /* ... */ }
+}
+
+const stopJobs = startScheduler(Janitor); // or a @Module class
+// gracefulShutdown({ onShutdown: () => { stopJobs(); stopEvents(); } })
+```
+
+- Overlap guard — a tick is skipped while the previous run is still executing.
+- Job errors are logged via `LOGGER`; the loop never crashes.
+- Timers are `unref`'d — they don't keep the process alive.
 
 ---
 
