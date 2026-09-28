@@ -42,6 +42,21 @@ No `tsconfig.json` flags required. hono-forge uses **TC39 Stage 3 decorators** �
 
 No `reflect-metadata` import. No `experimentalDecorators`. Just install and use.
 
+### Bun version
+
+hono-forge requires **Bun ≥ 1.2** (earlier versions don't expose `Symbol.metadata` globally; much older versions don't support TC39 decorators at all). Bun ≥ 1.3 is recommended.
+
+> **Docker users:** `oven/bun:latest` is frozen at whatever version you last pulled — Docker never auto-updates it. Pin an explicit version and refresh the base image:
+>
+> ```dockerfile
+> FROM oven/bun:1.3
+> ```
+>
+> ```bash
+> docker build --pull -t myapp .
+> docker exec <container> bun --version   # verify the version inside the container
+> ```
+
 ---
 
 ## Quick start
