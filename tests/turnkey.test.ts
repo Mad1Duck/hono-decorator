@@ -330,3 +330,44 @@ describe('controller versioning', () => {
     expect(await r1.json()).toEqual({ v: 1 });
   });
 });
+
+/* ================= RATE-LIMIT HEADERS (Task 40) ================= */
+
+describe('rate-limit headers', () => {
+  it('emits X-RateLimit-Limit/Remaining/Reset on every response', async () => {
+    const { RateLimit } = await import('../src');
+
+    @Controller('/rl-hdr')
+    class C {
+      @Get() @Public() @RateLimit({ max: 5, windowMs: 60_000 })
+      go() { return { ok: true }; }
+    }
+    const res = await HonoRouteBuilder.build(C).request(new Request('http://t.local/rl-hdr'));
+    expect(res.headers.get('X-RateLimit-Limit')).toBe('5');
+    expect(res.headers.get('X-RateLimit-Remaining')).toBe('4');
+    expect(Number(res.headers.get('X-RateLimit-Reset'))).toBeGreaterThan(0);
+  });
+});
+
+/* ================= EVENT WILDCARDS (Task 41) ================= */
+
+describe('@OnEvent wildcards', () => {
+  it("prefix.* listeners receive all matching events", async () => {
+    const hits: string[] = [];
+
+    @Injectable()
+    @Singleton()
+    class Wild {
+      @OnEvent('user.*')
+      onUser(p: unknown) { hits.push(JSON.stringify(p)); }
+    }
+
+    const stop = startEventBus(Wild);
+    await events.emit('user.created', 1);
+    await events.emit('user.deleted', 2);
+    await events.emit('order.created', 3); // must NOT match
+    stop();
+
+    expect(hits).toEqual(['1', '2']);
+  });
+});

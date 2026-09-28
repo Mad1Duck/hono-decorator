@@ -29,8 +29,15 @@ const listeners = new Map<string, EventListener[]>();
  */
 export const events = {
   async emit(name: string, payload?: unknown): Promise<void> {
-    const subs = listeners.get(name);
-    if (!subs || subs.length === 0) return;
+    // Exact matches + `prefix.*` wildcards (e.g. @OnEvent('user.*')).
+    const subs: EventListener[] = [];
+    for (const [pattern, list] of listeners) {
+      const matches =
+        pattern === name ||
+        (pattern.endsWith('*') && name.startsWith(pattern.slice(0, -1)));
+      if (matches) subs.push(...list);
+    }
+    if (subs.length === 0) return;
     await Promise.all(
       subs.map(async ({ token, method }) => {
         try {

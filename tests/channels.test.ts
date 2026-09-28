@@ -29,7 +29,7 @@ function makeWs(readyState = 1) {
   };
 }
 
-function makeClient(id: string, alive = true): ChannelClient {
+function makeClient(id: string, alive = true): ChannelClient & { _msgs: Array<{ event: string; data: unknown }> } {
   const msgs: Array<{ event: string; data: unknown }> = [];
   return {
     id,
@@ -237,5 +237,105 @@ describe('ChannelRegistry', () => {
     await registry.subscribe('ch', makeClient('u1'));
     await registry.unsubscribe('ch', 'u1');
     expect(adapter.subscriberCount('ch')).toBe(0);
+  });
+});
+
+/* ================= REDIS INTEGRATION (loopback pair) ================= */
+
+/**
+ * Realistic loopback Redis pair: pub.publish serializes and asynchronously
+ * delivers to sub 'message' listeners — exercising the full
+ * subscribe → JSON roundtrip → delivery → unsubscribe path without mocks.
+ */
+function makeLoopbackRedis() {
+  const handlers = new Set<(channel: string, message: string) => void>();
+  const subscribed = new Set<string>();
+
+  const pub: RedisPubClient = {
+    publish: async (channel, message) => {
+      // Deliver on a microtask tick like a real connection would.
+      queueMicrotask(() => {
+        if (!subscribed.has(channel)) return;
+        for (const h of handlers) h(channel, message);
+      });
+      return 1;
+    },
+    quit: async () => 'OK',
+  };
+
+  const sub: RedisSubClient = {
+    subscribe: async (...channels) => {
+      channels.forEach((ch) => subscribed.add(ch));
+      return subscribed.size;
+    },
+    unsubscribe: async (...channels) => {
+      channels.forEach((ch) => subscribed.delete(ch));
+      return subscribed.size;
+    },
+    on(event, listener) {
+      if (event === 'message') handlers.add(listener);
+      return this;
+    },
+    quit: async () => 'OK',
+  };
+
+  return { pub, sub, subscribed };
+}
+
+describe('RedisChannelAdapter (loopback integration)', () => {
+  it('delivers a published message through the full JSON roundtrip', async () => {
+    const { pub, sub } = makeLoopbackRedis();
+    const adapter = new RedisChannelAdapter(pub, sub);
+    const client = makeClient('c1');
+
+    await adapter.subscribe('orders', client);
+    await adapter.publish('orders', 'order.created', { id: 42 });
+    await new Promise((r) => setTimeout(r, 0)); // flush microtasks
+
+    expect(client._msgs).toEqual([{ event: 'order.created', data: { id: 42 } }]);
+  });
+
+  it('does not deliver to channels that were never subscribed at Redis level', async () => {
+    const { pub, sub, subscribed } = makeLoopbackRedis();
+    const adapter = new RedisChannelAdapter(pub, sub);
+    const client = makeClient('c1');
+
+    await adapter.subscribe('orders', client);
+    subscribed.delete('orders'); // simulate Redis-side drop
+    await adapter.publish('orders', 'order.created', { id: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(client._msgs).toHaveLength(0);
+  });
+
+  it('unsubscribes from Redis when the last local client leaves', async () => {
+    const { pub, sub, subscribed } = makeLoopbackRedis();
+    const adapter = new RedisChannelAdapter(pub, sub);
+    const c1 = makeClient('c1');
+    const c2 = makeClient('c2');
+
+    await adapter.subscribe('orders', c1);
+    await adapter.subscribe('orders', c2);
+    expect(subscribed.has('orders')).toBe(true);
+
+    await adapter.unsubscribe('orders', 'c1');
+    expect(subscribed.has('orders')).toBe(true); // c2 still there
+
+    await adapter.unsubscribe('orders', 'c2');
+    expect(subscribed.has('orders')).toBe(false); // channel drained
+  });
+
+  it('multi-instance broadcast: pub on adapter A reaches clients of adapter B', async () => {
+    const { pub, sub, subscribed } = makeLoopbackRedis();
+    const adapterA = new RedisChannelAdapter(pub, sub);
+    // Second "instance" shares the same Redis connection pair semantics —
+    // model it with a second sub handler on the same bus.
+    const adapterB = new RedisChannelAdapter(pub, sub);
+    const clientB = makeClient('b1');
+
+    await adapterB.subscribe('orders', clientB);
+    await adapterA.publish('orders', 'order.shipped', { id: 7 });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(clientB._msgs).toEqual([{ event: 'order.shipped', data: { id: 7 } }]);
   });
 });

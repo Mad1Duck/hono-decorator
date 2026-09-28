@@ -19,12 +19,17 @@
     "LICENSE"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0",
+    "bun": ">=1.2.0"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "type-check": "tsc --noEmit",
     "test": "bun test",
     "test:watch": "bun test --watch",
+    "test:node": "bun build scripts/smoke.ts --target node --outdir .tmp && node .tmp/smoke.js",
     "prepublishOnly": "bun run type-check && bun test && bun run build",
     "release": "release-it",
     "release:dry": "release-it --dry-run",

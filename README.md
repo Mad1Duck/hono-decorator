@@ -801,7 +801,7 @@ internalApp.route('/', HonoRouteBuilder.build(AdminController));
 
 ## Rate limiting
 
-`@RateLimit` works out of the box — a per-route in-memory fixed-window limiter is used when no factory is configured, keyed by client IP (or `keyGenerator` when provided). Exceeding `max` returns `429 Too Many Requests` with `retryAfterMs` in `meta`.
+`@RateLimit` works out of the box — a per-route in-memory fixed-window limiter is used when no factory is configured, keyed by client IP (or `keyGenerator` when provided). Exceeding `max` returns `429 Too Many Requests` with `retryAfterMs` in `meta`. Every response carries standard `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers so clients can back off gracefully.
 
 ```ts
 @Post('/login')
@@ -1477,6 +1477,9 @@ async create(c: Context) {
 class MailService {
   @OnEvent('user.created')            // repeatable — listen to multiple events
   async sendWelcome(payload: { id: string }) { /* ... */ }
+
+  @OnEvent('user.*')                  // wildcard — all user.* events
+  auditUserEvents(payload: unknown) { /* ... */ }
 }
 
 const stopEvents = startEventBus(MailService); // or pass a @Module class

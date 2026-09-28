@@ -3,7 +3,8 @@ import type { OnEventMetadata } from './metadata';
 
 /**
  * Subscribe a service method to an in-process event. Repeatable — decorate
- * twice to listen to multiple events.
+ * twice to listen to multiple events. Supports `prefix.*` wildcards:
+ * `@OnEvent('user.*')` receives `user.created`, `user.deleted`, ...
  *
  * The class must be registered via `startEventBus([...])` (or reachable from
  * an `@Module` passed to it) for the subscription to activate. The instance is

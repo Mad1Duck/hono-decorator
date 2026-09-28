@@ -32,6 +32,11 @@ export function inMemoryRateLimiter(options: RateLimiterFactoryOptions): HonoMid
     }
     entry.count += 1;
 
+    // Standard rate-limit headers — clients use these for backoff.
+    c.header('X-RateLimit-Limit', String(options.max));
+    c.header('X-RateLimit-Remaining', String(Math.max(0, options.max - entry.count)));
+    c.header('X-RateLimit-Reset', String(Math.ceil(entry.resetAt / 1000)));
+
     if (entry.count > options.max) {
       throw HttpException.tooManyRequests(options.message ?? 'Too many requests', {
         meta: { retryAfterMs: entry.resetAt - now },
