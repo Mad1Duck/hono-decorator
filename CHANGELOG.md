@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v3.3.0...v4.0.0) (2026-09-28)
+
+### ⚠ BREAKING CHANGES
+
+* OpenAPI operationId now includes the controller class name (e.g. get_UserController_list). Regenerate API clients. channels.unsubscribe() now removes every connection with the given id.
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+
+### Features
+
+* add modules, exception filters, channel bridge, typed client, testing utils, and JWT auth ([672ba89](https://github.com/Mad1Duck/hono-decorator/commit/672ba89c55612095444009b218e9055c25dbf0a7))
+
+### Bug Fixes
+
+* response passthrough, request-scoped DI, error status codes, input handling, and channel leaks ([5c7ecb8](https://github.com/Mad1Duck/hono-decorator/commit/5c7ecb8153887a0c2b254deebf94d90ab547f945))
+
 ## [3.3.0](https://github.com/Mad1Duck/hono-decorator/compare/v3.1.0...v3.3.0) (2026-09-28)
 
 ## [3.2.0](https://github.com/Mad1Duck/hono-decorator/compare/v3.1.0...v3.2.0) (2026-09-28)
