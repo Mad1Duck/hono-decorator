@@ -76,10 +76,19 @@ export function ApiQuery(
 
 /* ================= API DEPRECATED ================= */
 
-export function ApiDeprecated(): MethodDec {
+/**
+ * Mark the route deprecated in the OpenAPI spec AND emit `Deprecation: true`
+ * (RFC 9745) on every response. Pass `sunset` (ISO date string or Date) to
+ * also emit a `Sunset` header.
+ */
+export function ApiDeprecated(sunset?: string | Date): MethodDec {
   return (_value, context) => {
     const name = String(context.name);
-    setMethodOpenApi(context, name, { ...getMethodOpenApi(context, name), deprecated: true });
+    const sunsetDate = sunset instanceof Date ? sunset.toUTCString() : sunset;
+    setMethodOpenApi(context, name, {
+      ...getMethodOpenApi(context, name),
+      deprecated: sunsetDate ? { sunset: sunsetDate } : true,
+    });
   };
 }
 

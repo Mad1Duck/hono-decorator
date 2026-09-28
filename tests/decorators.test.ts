@@ -182,8 +182,8 @@ describe('@Sse', () => {
   });
 
   it('sets SSE_ROUTE metadata on the handler', () => {
-    const isSse = getMethodMeta<boolean>(SseRoutes, METADATA_KEYS.SSE_ROUTE, 'events');
-    expect(isSse).toBe(true);
+    const sse = getMethodMeta<Record<string, unknown>>(SseRoutes, METADATA_KEYS.SSE_ROUTE, 'events');
+    expect(sse).toBeDefined();
   });
 });
 

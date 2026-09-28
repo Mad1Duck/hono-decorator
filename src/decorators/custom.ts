@@ -82,15 +82,13 @@ export function ValidateResult(schema: ZodTypeAny) {
 
 /* ================= AUDIT ================= */
 
-type LoggerLike = { info?: (data: unknown, message?: string) => void; };
+import { getLogger, type Logger } from '../core/logger';
 
 export function Audit(options: { action: string; }) {
   return <T extends AnyFn>(originalFn: T, context: ClassMethodDecoratorContext): T => {
     const methodRef = String(context.name);
-    return (async function (this: { logger?: LoggerLike; currentUser?: { id?: string; }; }, ...args: unknown[]) {
-      const log: LoggerLike = this.logger ?? {
-        info: (data, msg) => console.log(`[${methodRef}]`, msg, data),
-      };
+    return (async function (this: { logger?: Logger; currentUser?: { id?: string; }; }, ...args: unknown[]) {
+      const log: Logger = this.logger ?? getLogger();
       log.info?.(
         { action: options.action, user: this.currentUser?.id, timestamp: new Date().toISOString(), method: methodRef },
         'Audit log'

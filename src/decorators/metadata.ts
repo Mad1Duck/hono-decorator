@@ -27,6 +27,10 @@ export const METADATA_KEYS = {
   VALIDATION: Symbol('validation'),
   CACHE: Symbol('cache'),
   CACHE_INVALIDATE: Symbol('cacheInvalidate'),
+  IDEMPOTENT: Symbol('idempotent'),
+  SINGLE_FLIGHT: Symbol('singleFlight'),
+  HEADERS: Symbol('headers'),
+  REDIRECT: Symbol('redirect'),
   RATE_LIMIT: Symbol('rateLimit'),
   OPENAPI: Symbol('openapi'),
   CLASS_OPENAPI: Symbol('classOpenapi'),
@@ -119,7 +123,8 @@ export interface OpenAPIMetadata {
   summary?: string;
   description?: string;
   tags?: string[];
-  deprecated?: boolean;
+  /** `true` or `{ sunset }` — also emitted as Deprecation/Sunset headers. */
+  deprecated?: boolean | { sunset?: string };
   responses?: Record<number, { description?: string; schema?: ZodType; }>;
   body?: { schema: ZodType; required?: boolean; description?: string; };
   query?: Record<string, { schema: ZodType; required?: boolean; description?: string; }>;
@@ -136,6 +141,23 @@ export interface CacheMetadata {
 
 /** Channel pattern for @ChannelRoute — static or resolved per request. */
 export type ChannelRouteMetadata = string | ((c: Context) => string);
+
+/* ================= RESPONSE DECORATORS ================= */
+
+/** @Idempotent metadata — replay responses for a repeated Idempotency-Key. */
+export interface IdempotentMetadata {
+  /** How long the stored response is replayable. Default 24h. */
+  ttl?: number;
+}
+
+/** @Header metadata — static response headers per method. */
+export type HeadersMetadata = Record<string, string>;
+
+/** @Redirect metadata — always redirect, handler is never invoked. */
+export interface RedirectMetadata {
+  location: string;
+  status: 301 | 302 | 303 | 307 | 308;
+}
 
 /* ================= RATE LIMIT ================= */
 

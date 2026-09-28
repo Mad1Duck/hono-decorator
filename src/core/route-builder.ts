@@ -7,6 +7,7 @@ import { container } from './container';
 import { defaultCacheAdapter } from './cache';
 import type { CacheAdapter } from './cache';
 import { HttpException } from './http-exception';
+import { inMemoryRateLimiter } from './rate-limit';
 import { createRequestContext, runInRequestContext } from './request-context';
 import { METADATA_KEYS } from '../decorators/metadata';
 import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
@@ -18,8 +19,13 @@ import type {
   CacheMetadata,
   ChannelRouteMetadata,
   ModuleMetadata,
+  OpenAPIMetadata,
+  IdempotentMetadata,
+  HeadersMetadata,
+  RedirectMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
+import type { SseOptions } from '../decorators/sse';
 import type { ExceptionFilter, ExceptionFilterConstructor } from '../decorators/filters';
 import { channels } from '../channels/registry';
 import { SseChannelClient, WsChannelClient } from '../channels/clients';
@@ -101,6 +107,22 @@ export interface RouteDescription {
   websocket: boolean;
   /** @ChannelRoute pattern — a function means it is resolved per request. */
   channelRoute?: ChannelRouteMetadata;
+  /** @Idempotent — responses replayed per Idempotency-Key header. */
+  idempotent?: IdempotentMetadata;
+  /** @SingleFlight — concurrent identical requests share one execution. */
+  singleFlight: boolean;
+  /** @Redirect — route always redirects; handler never runs. */
+  redirect?: RedirectMetadata;
+  /** @Header static response headers. */
+  headers?: HeadersMetadata;
+}
+
+/** JSON-safe snapshot of a Response, used by @Idempotent and @SingleFlight. */
+export interface ResponseSnapshot {
+  status: number;
+  headers: Record<string, string>;
+  /** Base64-encoded body. */
+  body: string;
 }
 
 export type { RequestLogger, RequestLogEntry };
@@ -109,6 +131,29 @@ export type { RequestLogger, RequestLogEntry };
 
 export class HonoRouteBuilder {
   private static config: RouteBuilderConfig = {};
+
+  /** In-flight request promises deduplicated by @SingleFlight / @Idempotent. */
+  private static inflight = new Map<string, Promise<ResponseSnapshot>>();
+
+  /** Read a Response into a JSON-safe snapshot (body base64-encoded). */
+  private static async snapshotResponse(res: Response): Promise<ResponseSnapshot> {
+    const headers: Record<string, string> = {};
+    res.headers.forEach((value, name) => {
+      // set-cookie is client-specific; length/framing is recomputed on replay.
+      if (name === 'set-cookie' || name === 'content-length' || name === 'transfer-encoding') return;
+      headers[name] = value;
+    });
+    const body = Buffer.from(await res.arrayBuffer()).toString('base64');
+    return { status: res.status, headers, body };
+  }
+
+  /** Rebuild a Response from a {@link ResponseSnapshot}. */
+  private static restoreSnapshot(snap: ResponseSnapshot): Response {
+    return new Response(Buffer.from(snap.body, 'base64'), {
+      status: snap.status,
+      headers: snap.headers,
+    });
+  }
 
   static configure(config: RouteBuilderConfig): void {
     this.config = config;
@@ -198,9 +243,13 @@ export class HonoRouteBuilder {
     const classMws = (meta?.[METADATA_KEYS.MIDDLEWARES] as HonoMiddlewareFn[] | undefined) ?? [];
     const isPublicMap = (meta?.[METADATA_KEYS.IS_PUBLIC] as Record<string, boolean> | undefined) ?? {};
     const isPrivateMap = (meta?.[METADATA_KEYS.IS_PRIVATE] as Record<string, boolean> | undefined) ?? {};
-    const sseMap = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
+    const sseMap = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, SseOptions> | undefined) ?? {};
     const wsMap = (meta?.[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
     const channelMap = (meta?.[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, ChannelRouteMetadata> | undefined) ?? {};
+    const idemMap = (meta?.[METADATA_KEYS.IDEMPOTENT] as Record<string, IdempotentMetadata> | undefined) ?? {};
+    const sfMap = (meta?.[METADATA_KEYS.SINGLE_FLIGHT] as Record<string, boolean> | undefined) ?? {};
+    const redirectMap = (meta?.[METADATA_KEYS.REDIRECT] as Record<string, RedirectMetadata> | undefined) ?? {};
+    const headerMap = (meta?.[METADATA_KEYS.HEADERS] as Record<string, HeadersMetadata> | undefined) ?? {};
 
     const names = (mws: HonoMiddlewareFn[]) => mws.map(mw => mw.name || 'anonymous');
 
@@ -216,10 +265,51 @@ export class HonoRouteBuilder {
       rateLimit: allRateLimits[route.handlerName],
       cache: allCache[route.handlerName],
       cacheInvalidate: allInvalidate[route.handlerName],
-      sse: sseMap[route.handlerName] ?? false,
+      sse: sseMap[route.handlerName] !== undefined,
       websocket: wsMap[route.handlerName] ?? false,
       channelRoute: channelMap[route.handlerName],
+      idempotent: idemMap[route.handlerName],
+      singleFlight: sfMap[route.handlerName] ?? false,
+      redirect: redirectMap[route.handlerName],
+      headers: headerMap[route.handlerName],
     }));
+  }
+
+  /**
+   * Print a route table (method/path/handler/guards/...) for a controller or
+   * @Module class — handy for verifying wiring at startup during development.
+   * Pure metadata read, nothing is instantiated.
+   */
+  static printRoutes(target: Function): void {
+    const controllers =
+      classMeta(target)?.[METADATA_KEYS.MODULE] !== undefined
+        ? this.collectModule(target, new Set()).controllers
+        : [target];
+
+    const rows = (controllers as ControllerConstructor[]).flatMap((ctrl) =>
+      this.describe(ctrl).map((d) => ({
+        method: d.method.toUpperCase(),
+        path: d.path,
+        handler: d.handlerName,
+        guards: d.isPublic ? 'public' : (d.guards.map(g => g.name).join(',') || '-'),
+        middleware: d.middlewares.join(',') || '-',
+        flags: [
+          d.cache ? `cache:${d.cache.ttl}ms` : '',
+          d.sse ? 'sse' : '',
+          d.websocket ? 'ws' : '',
+          d.channelRoute ? 'channel' : '',
+          d.idempotent ? 'idem' : '',
+          d.singleFlight ? 'flight' : '',
+          d.redirect ? `→${d.redirect.status}` : '',
+        ].filter(Boolean).join(',') || '-',
+      }))
+    );
+
+    if (rows.length === 0) {
+      console.log('[hono-forge] No routes found.');
+      return;
+    }
+    console.table(rows);
   }
 
   /**
@@ -371,13 +461,8 @@ export class HonoRouteBuilder {
     ];
 
     if (rateLimitMeta) {
-      if (!this.config.rateLimiterFactory) {
-        throw new Error(
-          `[hono-forge] Route "${routeLabel}" has @RateLimit but no rateLimiterFactory is configured.\n` +
-          `Call HonoRouteBuilder.configure({ rateLimiterFactory }) before building routes.`
-        );
-      }
-      middlewares.push(wrapMiddleware(this.config.rateLimiterFactory({
+      const rateLimiterFactory = this.config.rateLimiterFactory ?? inMemoryRateLimiter;
+      middlewares.push(wrapMiddleware(rateLimiterFactory({
         max: rateLimitMeta.max,
         windowMs: rateLimitMeta.windowMs,
         keyPrefix: rateLimitMeta.keyPrefix || `rl:route:${handlerName}:`,
@@ -434,8 +519,10 @@ export class HonoRouteBuilder {
       typeof channelPattern === 'function' ? channelPattern(c) : channelPattern;
 
     /* ----- SSE Route ----- */
-    const allSse = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
-    if (allSse[handlerName]) {
+    const allSse = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, SseOptions> | undefined) ?? {};
+    const sseMeta = allSse[handlerName];
+    if (sseMeta) {
+      const keepAliveMs = sseMeta.keepAliveMs;
       const sseHandler = ((c: Context) => {
         const startMs = Date.now();
         const ua = extractUserAgent(c);
@@ -443,32 +530,44 @@ export class HonoRouteBuilder {
         c.header('x-request-id', traceId);
 
         return streamSSE(c, async (stream) => {
-          if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
-          const ctx = createRequestContext(traceId);
-          await runInRequestContext(ctx, () =>
-            container.runInScope(async () => {
-              const inst = getController();
-              const fn = inst[handlerName];
-              if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
-              await fn.call(inst, c, stream);
-            })
-          );
+          // SSE keepalive: periodic comment lines prevent proxies/load
+          // balancers from closing idle connections.
+          const keepAlive = keepAliveMs
+            ? setInterval(() => {
+                void stream.write(': keepalive\n\n').catch(() => { /* stream closed */ });
+              }, keepAliveMs)
+            : undefined;
 
-          // @ChannelRoute: subscribe this stream and hold it open until the
-          // client disconnects.
-          if (channelPattern) {
-            const channel = resolveChannel(c)!;
-            const client = new SseChannelClient(crypto.randomUUID(), stream);
-            await channels.subscribe(channel, client);
-            try {
-              await new Promise<void>((resolve) => stream.onAbort(() => resolve()));
-            } finally {
-              await channels.unsubscribe(channel, client.id);
+          try {
+            if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
+            const ctx = createRequestContext(traceId);
+            await runInRequestContext(ctx, () =>
+              container.runInScope(async () => {
+                const inst = getController();
+                const fn = inst[handlerName];
+                if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
+                await fn.call(inst, c, stream);
+              })
+            );
+
+            // @ChannelRoute: subscribe this stream and hold it open until the
+            // client disconnects.
+            if (channelPattern) {
+              const channel = resolveChannel(c)!;
+              const client = new SseChannelClient(crypto.randomUUID(), stream);
+              await channels.subscribe(channel, client);
+              try {
+                await new Promise<void>((resolve) => stream.onAbort(() => resolve()));
+              } finally {
+                await channels.unsubscribe(channel, client.id);
+              }
             }
-          }
 
-          if (requestLogger) {
-            await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
+            if (requestLogger) {
+              await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
+            }
+          } finally {
+            if (keepAlive) clearInterval(keepAlive);
           }
         });
       }) as unknown as HonoMiddlewareFn;
@@ -535,6 +634,18 @@ export class HonoRouteBuilder {
       return;
     }
 
+    /* ----- Response-shaping metadata ----- */
+    const allIdempotent = (meta?.[METADATA_KEYS.IDEMPOTENT] as Record<string, IdempotentMetadata> | undefined) ?? {};
+    const idemMeta = allIdempotent[handlerName];
+    const allSingleFlight = (meta?.[METADATA_KEYS.SINGLE_FLIGHT] as Record<string, boolean> | undefined) ?? {};
+    const singleFlight = allSingleFlight[handlerName] ?? false;
+    const allHeaders = (meta?.[METADATA_KEYS.HEADERS] as Record<string, HeadersMetadata> | undefined) ?? {};
+    const headerMeta = allHeaders[handlerName];
+    const allRedirect = (meta?.[METADATA_KEYS.REDIRECT] as Record<string, RedirectMetadata> | undefined) ?? {};
+    const redirectMeta = allRedirect[handlerName];
+    const allOpenApi = (meta?.[METADATA_KEYS.OPENAPI] as Record<string, OpenAPIMetadata> | undefined) ?? {};
+    const deprecatedMeta = allOpenApi[handlerName]?.deprecated;
+
     /* ----- Standard HTTP Route ----- */
     const httpHandler = async (c: Context) => {
       const startMs = Date.now();
@@ -542,7 +653,38 @@ export class HonoRouteBuilder {
       const traceId = c.req.header('x-request-id') ?? crypto.randomUUID();
       c.header('x-request-id', traceId);
 
+      // @Redirect — the handler is never invoked.
+      if (redirectMeta) return c.redirect(redirectMeta.location, redirectMeta.status);
+
+      if (headerMeta) {
+        for (const [name, value] of Object.entries(headerMeta)) c.header(name, value);
+      }
+
+      // RFC 9745: @ApiDeprecated emits Deprecation (+ optional Sunset) headers.
+      if (deprecatedMeta) {
+        c.header('Deprecation', 'true');
+        const sunset = typeof deprecatedMeta === 'object' ? deprecatedMeta.sunset : undefined;
+        if (sunset) c.header('Sunset', sunset);
+      }
+
       if (onRequestStart) await onRequestStart({ method: c.req.method, path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
+
+      // @Idempotent — replay the stored response for a repeated key.
+      let idemKey: string | undefined;
+      if (idemMeta) {
+        const key = c.req.header('Idempotency-Key');
+        if (key) {
+          idemKey = `idem:${c.req.method} ${c.req.path}:${key}`;
+          const hit = await cacheAdapter.get(idemKey);
+          if (hit) {
+            const snap = hit.value as ResponseSnapshot;
+            if (requestLogger) {
+              await requestLogger({ method: c.req.method, path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: snap.status, durationMs: Date.now() - startMs, traceId });
+            }
+            return HonoRouteBuilder.restoreSnapshot(snap);
+          }
+        }
+      }
 
       let cacheKey: string | undefined;
       if (cacheMeta) {
@@ -557,9 +699,10 @@ export class HonoRouteBuilder {
         }
       }
 
-      const ctx = createRequestContext(traceId);
-      const response = await runInRequestContext(ctx, () =>
-        container.runInScope(async () => {
+      const execute = () => {
+        const ctx = createRequestContext(traceId);
+        return runInRequestContext(ctx, () =>
+          container.runInScope(async () => {
           try {
             const inst = getController();
             const fn = inst[handlerName];
@@ -604,23 +747,63 @@ export class HonoRouteBuilder {
             throw error;
           }
         })
-      );
+        );
+      };
 
-      if (requestLogger) {
-        await requestLogger({
-          method: c.req.method,
-          path: c.req.path,
-          ip: extractIp(c),
-          device: detectDevice(ua),
-          userAgent: ua,
-          statusCode: response.status,
-          durationMs: Date.now() - startMs,
-          userId: (c.get('user') as { id?: string; } | undefined)?.id,
-          traceId,
-        });
+      // @SingleFlight / @Idempotent: dedupe concurrent identical requests —
+      // every caller receives a copy of one shared response snapshot.
+      const dedupeKey = singleFlight
+        ? `sf:${c.req.method} ${c.req.url}`
+        : idemKey
+          ? `sf:${idemKey}`
+          : undefined;
+
+      const logRequest = async (statusCode: number) => {
+        if (requestLogger) {
+          await requestLogger({
+            method: c.req.method,
+            path: c.req.path,
+            ip: extractIp(c),
+            device: detectDevice(ua),
+            userAgent: ua,
+            statusCode,
+            durationMs: Date.now() - startMs,
+            userId: (c.get('user') as { id?: string; } | undefined)?.id,
+            traceId,
+          });
+        }
+      };
+
+      if (!dedupeKey) {
+        const response = await execute();
+        await logRequest(response.status);
+        return response;
       }
 
-      return response;
+      const existing = HonoRouteBuilder.inflight.get(dedupeKey);
+      if (existing) {
+        const snap = await existing;
+        await logRequest(snap.status);
+        return HonoRouteBuilder.restoreSnapshot(snap);
+      }
+
+      const shared = execute().then((res) => HonoRouteBuilder.snapshotResponse(res));
+      HonoRouteBuilder.inflight.set(dedupeKey, shared);
+      let snap: ResponseSnapshot;
+      try {
+        snap = await shared;
+      } finally {
+        HonoRouteBuilder.inflight.delete(dedupeKey);
+      }
+
+      // Only successful responses are replayable via Idempotency-Key — a
+      // failed attempt must be retried, not replayed.
+      if (idemKey && snap.status >= 200 && snap.status < 300) {
+        await cacheAdapter.set(idemKey, snap, idemMeta!.ttl ?? 86_400_000);
+      }
+
+      await logRequest(snap.status);
+      return HonoRouteBuilder.restoreSnapshot(snap);
     };
 
     const httpMethod = method === 'head' ? 'GET' : method;

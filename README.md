@@ -10,15 +10,17 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Context helpers** — `Body`, `Param`, `Query`, `Headers`, `User`, `Ip`, `Device`, `Cookie`, `UploadedFile` and more — typed functions called inside the handler with `c` as first arg
 - **Dependency injection** — `@Injectable([deps])`, `@Singleton`, `@RequestScoped`, circular dependency detection, lifecycle hooks
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
-- **Rate limiting** — `@RateLimit` with pluggable factory
+- **Rate limiting** — `@RateLimit` works out of the box (in-memory), pluggable to Redis via factory
+- **Idempotency** — `@Idempotent` replays responses per `Idempotency-Key`; `@SingleFlight` dedupes concurrent identical requests
 - **Middleware** — `@Middleware` / `@Use` at class or method level; built-in `@Cors`, `@Compress`, `@SecureHeaders`, `@PrettyJson`
 - **Auto-discovery** — `discoverControllers` (Bun) and `fromModules` (any bundler)
-- **SSE** — `@Sse` — handler receives `(c: Context, stream: SSEStreamingApi)`
+- **SSE** — `@Sse` with optional keepalive — handler receives `(c: Context, stream: SSEStreamingApi)`
 - **WebSocket** — `@WebSocket` with pluggable upgrader
 - **Channels** — pub/sub for SSE and WS; in-memory default, pluggable to Redis
 - **Request logging** — pluggable `requestLogger` with IP, device, UA, duration
 - **Error handling** — pluggable `onError` for unhandled route errors
 - **Interceptors** — `@Retry`, `@Timeout`, `@Transform`, `@Cache`, `@TrackMetrics`
+- **Operational helpers** — `mountHealth` health checks, `gracefulShutdown`, `printRoutes` route table, `LOGGER` DI token
 
 ## Install
 
@@ -126,7 +128,15 @@ OpenAPIGenerator.mount(app, spec);
 export default app;
 ```
 
-Annotate controllers with `@ApiTags`, `@ApiDoc`, `@ApiResponse`, `@ApiDeprecated` — auth, validation, and path params are reflected automatically. For request bodies and query params, use `@ApiBody` and `@ApiQuery` — `required` is auto-inferred from the Zod schema (`.optional()`/`.default()` → optional):
+Or generate + mount in one call — pass controllers directly:
+
+```ts
+OpenAPIGenerator.mount(app, [UserController, OrderController], {
+  info: { title: 'My API', version: '1.0.0' },
+});
+```
+
+Annotate controllers with `@ApiTags`, `@ApiDoc`, `@ApiResponse`, `@ApiDeprecated` — auth, validation, and path params are reflected automatically. `@ApiDeprecated` also marks the route `deprecated` in the spec **and** emits an RFC 9745 `Deprecation: true` response header (pass a date for a `Sunset` header). For request bodies and query params, use `@ApiBody` and `@ApiQuery` — `required` is auto-inferred from the Zod schema (`.optional()`/`.default()` → optional):
 
 ```ts
 @Post()
@@ -729,14 +739,9 @@ internalApp.route('/', HonoRouteBuilder.build(AdminController));
 
 ## Rate limiting
 
-```ts
-HonoRouteBuilder.configure({
-  rateLimiterFactory: ({ max, windowMs, keyPrefix, message, keyGenerator }) => {
-    // return a Hono middleware using your own Redis/memory store
-    return async (c, next) => { await next(); };
-  },
-});
+`@RateLimit` works out of the box — a per-route in-memory fixed-window limiter is used when no factory is configured, keyed by client IP (or `keyGenerator` when provided). Exceeding `max` returns `429 Too Many Requests` with `retryAfterMs` in `meta`.
 
+```ts
 @Post('/login')
 @RateLimit({ max: 5, windowMs: 60_000, message: 'Too many attempts' })
 async login(c: Context) {
@@ -744,6 +749,19 @@ async login(c: Context) {
   /* ... */
 }
 ```
+
+For multi-instance deployments, swap in a shared backend via `rateLimiterFactory`:
+
+```ts
+HonoRouteBuilder.configure({
+  rateLimiterFactory: ({ max, windowMs, keyPrefix, message, keyGenerator }) => {
+    // return a Hono middleware backed by Redis/etc.
+    return async (c, next) => { await next(); };
+  },
+});
+```
+
+> The default key is the client IP via `extractIp` — trusted proxy headers (`X-Forwarded-For`, `CF-Connecting-IP`) are used when present. If your proxy does not sanitize them, provide a `keyGenerator` keyed on an authenticated identity to prevent bypass by header spoofing.
 
 ---
 
@@ -865,6 +883,14 @@ class NotificationController {
     }
   }
 }
+```
+
+For idle streams (e.g. `@ChannelRoute` feeds that may go quiet), pass `keepAliveMs` — a `:keepalive` SSE comment is sent on that interval while the stream is open, preventing proxies/load balancers from closing the connection:
+
+```ts
+@Sse('/feed', { keepAliveMs: 15_000 })
+@ChannelRoute('notifications:*')
+feed(c: Context, stream: SSEStreamingApi) { /* ... */ }
 ```
 
 ---
@@ -1210,6 +1236,40 @@ HonoRouteBuilder.configure({ cacheAdapter: new MyRedisCacheAdapter(redis) });
 // implements CacheAdapter: get / set / delete / deletePattern
 ```
 
+### `@Idempotent`
+
+Safe retries for mutations: when the client sends an `Idempotency-Key` header, the first **successful** response is stored in the configured `CacheAdapter` and replayed for repeats of the same key — including concurrent duplicates, which share a single execution. Requests without the header pass through normally. Entries live for `ttl` ms (default 24h).
+
+```ts
+@Post('/orders')
+@Idempotent({ ttl: 86_400_000 }) // optional — default 24h
+createOrder(c: Context) { /* runs at most once per key */ }
+```
+
+### `@SingleFlight`
+
+Dedupes concurrent identical requests (same method + path + query): while one execution is in-flight, the other callers wait and receive a copy of its response. Guards against thundering-herd spikes on expensive endpoints.
+
+```ts
+@Get('/report')
+@SingleFlight()
+async report(c: Context) { return generateExpensiveReport(); }
+```
+
+> Keyed by URL, not request body — intended for reads or endpoints where identical concurrent requests are semantically equal. For client-driven mutations use `@Idempotent`.
+
+### `@Header` / `@Redirect`
+
+```ts
+@Get('/feed.xml') @Header('Cache-Control', 'max-age=300')
+feed() { /* ... */ }
+
+@Get('/old-users') @Redirect('/users', 308)
+oldUsers() { /* never invoked — route always redirects */ }
+```
+
+`@Header` is repeatable (multiple decorators merge) and applies to responses produced via `c.json`/`c.body`/etc. — a raw `new Response()` bypasses it. `@Redirect` skips the handler entirely (guards/middleware still run).
+
 ### `@Throttle`
 
 Limits how often a method can be called. Throws `HttpException(429)` (with `retryAfterMs` in `meta`) if called again before `ms` milliseconds have passed.
@@ -1253,14 +1313,14 @@ async getUser(id: number) { return db.findUser(id); }
 
 ### `@Audit`
 
-Logs an audit entry before the method executes. Reads `this.logger` (if present) or falls back to `console.log`. Entry includes `action`, `userId`, `timestamp`, and method name.
+Logs an audit entry before the method executes. Reads `this.logger` (if present), else the logger registered via `registerLogger()`/`LOGGER`, else a `ConsoleLogger` fallback. Entry includes `action`, `userId`, `timestamp`, and method name.
 
 ```ts
 @Audit({ action: 'user.delete' })
 async remove(id: string) { /* ... */ }
 ```
 
-Expects `this.logger` to implement `{ info(data, msg?): void }` (compatible with Pino, Winston, etc.).
+The logger contract is `{ info?(data, msg?): void }` (pino-style) — see [Operational helpers](#operational-helpers) for `registerLogger`.
 
 ### `@Transaction`
 
@@ -1322,6 +1382,63 @@ const prismaExecutor: TransactionExecutor<PrismaClient> =
 ```
 
 ---
+
+## Operational helpers
+
+### Health check — `mountHealth`
+
+```ts
+import { mountHealth } from 'hono-forge';
+
+mountHealth(app, {
+  // optional — default '/health'
+  path: '/health',
+  checks: {
+    db: async () => db.execute('select 1').then(() => true),
+    redis: () => redis.ping() === 'PONG',
+  },
+});
+// GET /health → 200 { status: 'ok', uptime, checks } or 503 when a check fails/throws
+```
+
+### Graceful shutdown — `gracefulShutdown`
+
+```ts
+import { gracefulShutdown } from 'hono-forge';
+
+const detach = gracefulShutdown({
+  timeoutMs: 10_000, // hard deadline before force-exit(1)
+  onShutdown: async () => { await server.stop(); },
+});
+// SIGINT/SIGTERM → onShutdown() → container.shutdown() (@OnModuleDestroy hooks) → exit(0)
+// returns a detach function that removes the signal listeners
+```
+
+### Route table — `printRoutes`
+
+```ts
+HonoRouteBuilder.printRoutes(AppModule); // or a controller class
+// ┌────────┬─────────┬──────────────────┬─────────┬─────────┬───────────┐
+// │ method │ path    │ handler          │ guards  │ flags   │ ...       │
+// └────────┴─────────┴──────────────────┴─────────┴─────────┴───────────┘
+```
+
+Pure metadata read — nothing is instantiated. Great for verifying wiring at startup during development.
+
+### Pluggable logger — `LOGGER` / `registerLogger`
+
+Internal logs (`@Audit` today) go through the `LOGGER` DI token. Bind your own implementation once at startup — pino/winston-compatible (`level(data, msg?)`):
+
+```ts
+import { registerLogger, LOGGER } from 'hono-forge';
+
+registerLogger(pinoInstance);          // or container.registerInstance(LOGGER, logger)
+
+@Injectable([LOGGER])
+class AuditService {
+  constructor(private log: Logger) {}  // injectable like any token
+}
+```
 
 ## Typed client
 

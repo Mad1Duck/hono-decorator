@@ -19,3 +19,7 @@ export type { PaginatedResult, PaginationMeta, PaginationQuery } from './paginat
 export { getTraceId, runWithTraceId } from './trace';
 export { createClient, generateClientTypes, ClientRequestError } from './client';
 export type { ForgeClient, ClientRequestInit, GenerateClientTypesOptions, RouteMap } from './client';
+export { mountHealth } from './health';
+export type { HealthCheck, HealthCheckResult, HealthOptions } from './health';
+export { gracefulShutdown } from './shutdown';
+export type { GracefulShutdownOptions } from './shutdown';

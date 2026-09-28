@@ -43,8 +43,16 @@ import {
   User,
   channels,
   InMemoryChannelAdapter,
+  Idempotent,
+  SingleFlight,
+  Header,
+  Redirect,
+  ApiDeprecated,
+  OpenAPIGenerator,
 } from '../src';
+import { Hono } from 'hono';
 import type { Context, Next } from 'hono';
+import type { SSEStreamingApi } from 'hono/streaming';
 import type { ExceptionFilter } from '../src';
 import { z } from 'zod';
 
@@ -241,8 +249,10 @@ describe('HonoRouteBuilder', () => {
       expect(() => HonoRouteBuilder.build(SecureController)).toThrow(/GET \/secure/);
     });
 
-    it('throws at build() when @RateLimit present but no rateLimiterFactory', () => {
-      expect(() => HonoRouteBuilder.build(LimitedController)).toThrow(/rateLimiterFactory/);
+    it('uses the default in-memory rate limiter when none is configured', async () => {
+      const app = HonoRouteBuilder.build(LimitedController);
+      const first = await app.fetch(makeRequest('/limited'));
+      expect(first.status).not.toBe(500);
     });
 
     it('does NOT throw when guardExecutor is configured', () => {
@@ -1381,5 +1391,134 @@ describe('@Module / buildModule', () => {
     @Module({ controllers: [NotAController] })
     class WeirdModule { }
     expect(() => HonoRouteBuilder.buildModule(WeirdModule)).toThrow(/@Controller/);
+  });
+});
+
+/* ================= RESPONSE DECORATORS & TURNKEY FEATURES ================= */
+
+describe('Response decorators & turnkey features', () => {
+  beforeEach(() => HonoRouteBuilder.configure({}));
+
+  it('@RateLimit works out of the box with the default in-memory limiter', async () => {
+    @Controller('/rl-default')
+    class C {
+      @Get() @Public() @RateLimit({ max: 2, windowMs: 60_000 })
+      go() { return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    expect((await app.request(makeRequest('/rl-default'))).status).toBe(200);
+    expect((await app.request(makeRequest('/rl-default'))).status).toBe(200);
+    const third = await app.request(makeRequest('/rl-default'));
+    expect(third.status).toBe(429);
+    const body = await third.json() as { error: { code: string } };
+    expect(body.error.code).toBe('TOO_MANY_REQUESTS');
+  });
+
+  it('@Header sets static response headers and merges when repeated', async () => {
+    @Controller('/hdr')
+    class C {
+      @Get() @Public() @Header('X-Powered-By', 'hono-forge') @Header('X-App', 'demo')
+      go() { return { ok: true }; }
+    }
+    const res = await HonoRouteBuilder.build(C).request(makeRequest('/hdr'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Powered-By')).toBe('hono-forge');
+    expect(res.headers.get('X-App')).toBe('demo');
+  });
+
+  it('@Redirect always redirects without invoking the handler', async () => {
+    let called = 0;
+    @Controller('/red')
+    class C {
+      @Get('/old') @Public() @Redirect('/new', 308)
+      old() { called++; return { ok: true }; }
+    }
+    const res = await HonoRouteBuilder.build(C).request(makeRequest('/red/old'));
+    expect(res.status).toBe(308);
+    expect(res.headers.get('location')).toBe('/new');
+    expect(called).toBe(0);
+  });
+
+  it('@ApiDeprecated emits Deprecation and optional Sunset headers', async () => {
+    @Controller('/dep')
+    class C {
+      @Get() @Public() @ApiDeprecated('2030-01-01T00:00:00Z')
+      go() { return { ok: true }; }
+      @Get('/plain') @Public() @ApiDeprecated()
+      plain() { return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    const res = await app.request(makeRequest('/dep'));
+    expect(res.headers.get('Deprecation')).toBe('true');
+    expect(res.headers.get('Sunset')).toContain('2030');
+    const res2 = await app.request(makeRequest('/dep/plain'));
+    expect(res2.headers.get('Deprecation')).toBe('true');
+    expect(res2.headers.get('Sunset')).toBeNull();
+  });
+
+  it('@Idempotent replays the stored response for a repeated Idempotency-Key', async () => {
+    let calls = 0;
+    @Controller('/idem')
+    class C {
+      @Post() @Public() @Idempotent()
+      create() { calls++; return { id: calls }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    const key = { 'Idempotency-Key': 'abc-123' };
+    const r1 = await app.request(makeRequest('/idem', { method: 'POST', headers: key }));
+    const r2 = await app.request(makeRequest('/idem', { method: 'POST', headers: key }));
+    expect(await r1.json()).toEqual({ id: 1 });
+    expect(await r2.json()).toEqual({ id: 1 });
+    expect(calls).toBe(1);
+    const r3 = await app.request(makeRequest('/idem', { method: 'POST', headers: { 'Idempotency-Key': 'other-key' } }));
+    expect(await r3.json()).toEqual({ id: 2 });
+    const r4 = await app.request(makeRequest('/idem', { method: 'POST' }));
+    expect(await r4.json()).toEqual({ id: 3 });
+  });
+
+  it('@SingleFlight shares one execution across concurrent identical requests', async () => {
+    let calls = 0;
+    @Controller('/flight')
+    class C {
+      @Get() @Public() @SingleFlight()
+      async expensive() { calls++; await new Promise((r) => setTimeout(r, 20)); return { n: calls }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    const results = await Promise.all([
+      app.request(makeRequest('/flight')),
+      app.request(makeRequest('/flight')),
+      app.request(makeRequest('/flight')),
+    ]);
+    expect(calls).toBe(1);
+    for (const r of results) expect(await r.json()).toEqual({ n: 1 });
+  });
+
+  it('@Sse keepAliveMs emits keepalive comments while the stream is open', async () => {
+    @Controller('/ka')
+    class C {
+      @Sse('', { keepAliveMs: 10 }) @Public()
+      async stream(_c: Context, stream: SSEStreamingApi) {
+        await new Promise((r) => setTimeout(r, 30));
+        await stream.writeSSE({ data: 'done' });
+      }
+    }
+    const res = await HonoRouteBuilder.build(C).request(makeRequest('/ka'));
+    const text = await res.text();
+    expect(text).toContain('keepalive');
+    expect(text).toContain('done');
+  });
+
+  it('OpenAPIGenerator.mount accepts controller classes directly', async () => {
+    @Controller('/mounted')
+    class C {
+      @Get() @Public()
+      go() { return { ok: true }; }
+    }
+    const app = new Hono();
+    OpenAPIGenerator.mount(app, [C], { info: { title: 'T', version: '1' }, docsPath: null });
+    const res = await app.request(makeRequest('/openapi.json'));
+    expect(res.status).toBe(200);
+    const spec = await res.json() as { paths: Record<string, unknown> };
+    expect(spec.paths['/mounted']).toBeDefined();
   });
 });

@@ -205,12 +205,30 @@ export class OpenAPIGenerator {
 
   /**
    * Mount `/openapi.json` and Scalar UI (`/docs`) onto an existing Hono app.
+   *
+   * Pass either a generated spec object, or an array of controller classes
+   * plus generate options — the spec is generated for you:
+   *
+   * @example
+   * OpenAPIGenerator.mount(app, [UserController], {
+   *   info: { title: 'My API', version: '1.0.0' },
+   * });
    */
+  static mount(app: Hono, spec: Record<string, unknown>, options?: OpenAPIMountOptions): void;
   static mount(
     app: Hono,
-    spec: Record<string, unknown>,
-    options: OpenAPIMountOptions = {}
+    controllers: Constructor[],
+    options: OpenAPIGenerateOptions & OpenAPIMountOptions
+  ): void;
+  static mount(
+    app: Hono,
+    specOrControllers: Record<string, unknown> | Constructor[],
+    options: (OpenAPIMountOptions & Partial<OpenAPIGenerateOptions>) = {}
   ): void {
+    const spec = Array.isArray(specOrControllers)
+      ? this.generate(specOrControllers, options as OpenAPIGenerateOptions)
+      : specOrControllers;
+
     const specPath = options.specPath ?? '/openapi.json';
     const docsPath = options.docsPath === undefined ? '/docs' : options.docsPath;
     const specJson = JSON.stringify(spec);
