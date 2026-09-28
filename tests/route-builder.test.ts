@@ -642,6 +642,45 @@ describe('HonoRouteBuilder', () => {
       const res = await app.fetch(makeRequest('/void-test'));
       expect(res.status).toBe(200);
     });
+
+    it('passes through a Response returned by the handler (c.json)', async () => {
+      @Controller('/resp-test')
+      class RespController {
+        @Get('/json') @Public()
+        json(c: Context) { return c.json({ ok: true }); }
+      }
+      const app = HonoRouteBuilder.build(RespController);
+      const res = await app.fetch(makeRequest('/resp-test/json'));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { ok: boolean; };
+      expect(body.ok).toBe(true);
+    });
+
+    it('passes through c.redirect', async () => {
+      @Controller('/resp-test')
+      class RespController {
+        @Get('/redir') @Public()
+        redir(c: Context) { return c.redirect('/resp-test/other'); }
+        @Get('/other') @Public()
+        other() { return { ok: true }; }
+      }
+      const app = HonoRouteBuilder.build(RespController);
+      const res = await app.fetch(makeRequest('/resp-test/redir'));
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe('/resp-test/other');
+    });
+
+    it('passes through a raw Response object', async () => {
+      @Controller('/resp-test')
+      class RespController {
+        @Get('/raw') @Public()
+        raw() { return new Response('plain', { status: 201, headers: { 'Content-Type': 'text/plain' } }); }
+      }
+      const app = HonoRouteBuilder.build(RespController);
+      const res = await app.fetch(makeRequest('/resp-test/raw'));
+      expect(res.status).toBe(201);
+      expect(await res.text()).toBe('plain');
+    });
   });
 
   /* -------- HttpException -------- */

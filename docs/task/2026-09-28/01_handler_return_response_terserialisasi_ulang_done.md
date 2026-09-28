@@ -12,10 +12,14 @@
 
 ## Checklist
 
-- [ ] Tambahkan passthrough `result instanceof Response` sebelum `c.json(result)`
-- [ ] Putuskan perilaku untuk `undefined` (saat ini `c.body(null)` → 200 kosong; pertimbangkan 204)
-- [ ] Tambah unit test: handler return `c.json`, `c.redirect`, `c.text`, `Response` mentah
-- [ ] Verifikasi `bun run type-check` / `bun test` / `bun run build`
-- [ ] Update README jika ada catatan "handler harus return plain value"
+- [x] Tambahkan passthrough `result instanceof Response` sebelum `c.json(result)`
+- [x] Putuskan perilaku untuk `undefined` — dipertahankan `c.body(null)` → 200 kosong (non-breaking)
+- [x] Tambah unit test: handler return `c.json`, `c.redirect`, `c.text`, `Response` mentah — 3 test baru di `tests/route-builder.test.ts` (describe `response`)
+- [x] Verifikasi `bun run type-check` / `bun test` / `bun run build` — semua hijau (224 tests)
+- [x] Update README — catatan "Return values" ditambahkan di section "Building routes"
 
 - Referensi: audit session 2026-09-28; `src/core/route-builder.ts` httpHandler
+
+## Status
+
+- [x] Completed

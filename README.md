@@ -490,6 +490,8 @@ app.route('/', HonoRouteBuilder.build(UserController, 'web'));
 app.route('/', HonoRouteBuilder.build(UserController, 'mobile'));
 ```
 
+**Return values:** a plain value is auto-serialized with `c.json()`; `undefined` returns an empty `200`. Returning a `Response` object (`c.json()`, `c.redirect()`, `c.html()`, raw `new Response()`) passes it through untouched.
+
 ---
 
 ## Context helpers

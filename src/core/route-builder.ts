@@ -333,6 +333,7 @@ export class HonoRouteBuilder {
             if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
 
             const result = await fn.call(controllerInstance, c);
+            if (result instanceof Response) return result;
             return result !== undefined ? c.json(result) : c.body(null);
           } catch (error: unknown) {
             if (error instanceof ZodError) {
