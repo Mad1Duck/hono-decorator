@@ -1,5 +1,7 @@
 # Changelog
 
+## [3.1.0](https://github.com/Mad1Duck/hono-decorator/compare/v3.0.0...v3.1.0) (2026-09-28)
+
 ## [3.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v1.0.0...v3.0.0) (2026-06-02)
 
 ## [2.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v1.0.0...v2.0.0) (2026-06-02)
