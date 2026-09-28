@@ -21,11 +21,12 @@ export interface PaginatedResult<T> {
 
 /**
  * Zod schema for standard pagination query params.
- * Use with @Query() or @ValidatedQuery() to validate incoming page/limit.
+ * Use with `ValidatedQuery(c, PaginationQuerySchema)` inside a handler.
  *
  * @example
  * @Get()
- * list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) {
+ * async list(c: Context) {
+ *   const q = await ValidatedQuery(c, PaginationQuerySchema);
  *   const { page, limit } = q;
  *   const [data, total] = await this.repo.findAndCount({ limit, offset: (page - 1) * limit });
  *   return paginate(data, total, q);
@@ -84,7 +85,7 @@ export function paginate<T>(
  * @Get()
  * @ApiResponse(200, { schema: UserListSchema })
  * @ValidateResult(UserListSchema)
- * async list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) { ... }
+ * async list(c: Context) { const q = await ValidatedQuery(c, PaginationQuerySchema); ... }
  */
 export function paginatedSchema<T extends ZodTypeAny>(itemSchema: T) {
   return z.object({

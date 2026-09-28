@@ -313,6 +313,59 @@ describe('Container', () => {
 
       expect(log).toEqual(['destroyed']);
     });
+
+    it('injects a lazy proxy into a singleton — resolves per scope', async () => {
+      @Injectable()
+      @RequestScoped()
+      class ScopedSvc { id = Math.random(); }
+
+      @Injectable([ScopedSvc])
+      @Singleton()
+      class Holder {
+        constructor(public dep: ScopedSvc) {}
+      }
+
+      const holder = c.resolve(Holder);
+      const ids = new Set<number>();
+      for (let i = 0; i < 2; i++) {
+        await c.runInScope(async () => { ids.add(holder.dep.id); });
+      }
+      expect(ids.size).toBe(2);
+    });
+
+    it('lazy proxy throws when accessed outside a request scope', async () => {
+      @Injectable()
+      @RequestScoped()
+      class ScopedSvc { id = Math.random(); }
+
+      @Injectable([ScopedSvc])
+      @Singleton()
+      class Holder {
+        constructor(public dep: ScopedSvc) {}
+      }
+
+      const holder = c.resolve(Holder);
+      expect(() => holder.dep.id).toThrow(/request.?scoped|outside a request scope/i);
+    });
+  });
+
+  /* -------- missing @Injectable tokens -------- */
+
+  describe('constructor params without tokens', () => {
+    it('throws DependencyResolutionError when class declares params but no tokens', () => {
+      class Dep { }
+      @Injectable()
+      class NeedsDep {
+        constructor(public dep: Dep) {}
+      }
+      expect(() => c.resolve(NeedsDep)).toThrow(/Did you forget @Injectable/);
+    });
+
+    it('resolves fine when the constructor has no params', () => {
+      @Injectable()
+      class NoDeps { ok = true; }
+      expect(c.resolve(NoDeps).ok).toBe(true);
+    });
   });
 
   /* -------- @Stateless enforcement -------- */

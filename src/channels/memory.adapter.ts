@@ -17,10 +17,7 @@ export class InMemoryChannelAdapter implements ChannelAdapter {
     if (!clients) return;
 
     for (const client of clients) {
-      if (client.id === clientId) {
-        clients.delete(client);
-        break;
-      }
+      if (client.id === clientId) clients.delete(client);
     }
 
     if (clients.size === 0) {
@@ -35,11 +32,15 @@ export class InMemoryChannelAdapter implements ChannelAdapter {
     const dead: ChannelClient[] = [];
 
     for (const client of clients) {
-      if (client.isAlive()) {
-        await client.send(event, data);
-      } else {
-        dead.push(client);
+      let alive = client.isAlive();
+      if (alive) {
+        try {
+          await client.send(event, data);
+        } catch {
+          alive = false; // send raced a disconnect — treat as dead
+        }
       }
+      if (!alive) dead.push(client);
     }
 
     for (const client of dead) {

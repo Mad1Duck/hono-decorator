@@ -1,5 +1,6 @@
 import { METADATA_KEYS } from './metadata';
 import type { CacheMetadata } from './metadata';
+import { HttpException } from '../core/http-exception';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyFn = (...args: any[]) => any;
@@ -22,8 +23,13 @@ export function Cache(options: CacheMetadata): (value: Function, context: ClassM
 
 export function TrackMetrics(options?: { name?: string; }) {
   return <T extends AnyFn>(originalFn: T, context: ClassMethodDecoratorContext): T => {
-    const metricName = options?.name ?? `?.${String(context.name)}`;
+    const methodName = String(context.name);
+    let className: string | undefined;
+    context.addInitializer(function (this: unknown) {
+      className = context.static ? (this as Function).name : (this as object).constructor.name;
+    });
     return (async function (this: { metrics?: MetricsLike; }, ...args: unknown[]) {
+      const metricName = options?.name ?? (className ? `${className}.${methodName}` : methodName);
       const start = Date.now();
       try {
         const result = await (originalFn as AnyFn).apply(this, args);
@@ -81,7 +87,7 @@ export function Timeout(ms: number) {
       return Promise.race([
         (originalFn as AnyFn).apply(this, args),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
+          setTimeout(() => reject(new HttpException(504, `Timeout after ${ms}ms`)), ms)
         ),
       ]);
     }) as unknown as T;

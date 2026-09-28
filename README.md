@@ -266,7 +266,20 @@ class RequestContext implements OnDestroy {
 }
 ```
 
-> Unlike `@Singleton`, a `@RequestScoped` class cannot be resolved outside a route handler (throws `DependencyResolutionError`).
+You can constructor-inject a request-scoped class into a `@Singleton` or another scoped class — hono-forge injects a **lazy proxy** that resolves the real instance inside the active request scope:
+
+```ts
+@Injectable([RequestContext])
+@Singleton()
+class AuditService {
+  constructor(private ctx: RequestContext) {}
+  log(action: string) { console.log(this.ctx.requestId, action); }  // resolved per request
+}
+```
+
+A `@RequestScoped` controller also works — the controller itself is instantiated per request.
+
+> A request-scoped instance cannot be resolved or accessed outside an active request scope (throws `DependencyResolutionError`). For `@WebSocket` handlers, request-scoped deps are resolved at upgrade time but never receive `onDestroy` — the socket outlives the request scope.
 
 ### `@Stateless()`
 
@@ -1074,6 +1087,8 @@ async fetchExternalData() { /* ... */ }
 async slowOperation() { /* ... */ }
 ```
 
+Throws `HttpException(504)` when exceeded — clients receive a proper `504 Gateway Timeout`.
+
 ### `@Transform`
 
 ```ts
@@ -1083,21 +1098,25 @@ getUser() { /* ... */ }
 
 ### `@Cache`
 
-Stores cache metadata — integrate with your own cache layer.
+Caches the handler's return value in memory, keyed by `key` (defaults to the method name) + request path + query string — so `/users/1` and `/users/2` cache separately. `ttl` (ms) is required.
 
 ```ts
 @Cache({ ttl: 60_000, key: 'user-list' })
 getAll() { /* ... */ }
 ```
 
+> Cached hits skip the handler entirely. A handler returning a `Response` object is not cached. For return-value caching independent of HTTP, see `@Memoize`.
+
 ### `@Throttle`
 
-Limits how often a method can be called. Throws if called again before `ms` milliseconds have passed.
+Limits how often a method can be called. Throws `HttpException(429)` (with `retryAfterMs` in `meta`) if called again before `ms` milliseconds have passed.
 
 ```ts
 @Throttle(1000)
 async sendWebhook() { /* ... */ }
 ```
+
+> The throttle window is keyed on the instance (`this`) — on a singleton controller it applies **globally across all requests/users**, not per-client. For per-IP/user rate limiting use `@RateLimit` with a `keyGenerator`.
 
 ### `@Memoize`
 

@@ -40,14 +40,14 @@ function getMeta(target: Function): ClassMeta | null {
   return (target as unknown as { [Symbol.metadata]?: ClassMeta })[Symbol.metadata] ?? null;
 }
 
-/** Convert Hono path params /:id → OpenAPI {id} */
+/** Convert Hono path params /:id (or /:id{[0-9]+}) → OpenAPI {id} */
 function honoPathToOpenAPI(path: string): string {
-  return path.replace(/:([^/]+)/g, '{$1}');
+  return path.replace(/:([^/{]+)(?:\{[^}]*\})?/g, '{$1}');
 }
 
-/** Extract all :param names from a Hono path string */
+/** Extract all :param names from a Hono path string (regex suffixes stripped) */
 function extractPathParamNames(path: string): string[] {
-  return [...path.matchAll(/:([^/]+)/g)].map(m => m[1]!);
+  return [...path.matchAll(/:([^/{]+)(?:\{[^}]*\})?/g)].map(m => m[1]!);
 }
 
 /** Convert a Zod schema to a plain JSON Schema object. */
@@ -159,7 +159,7 @@ export class OpenAPIGenerator {
         /* --- Build operation --- */
         const descriptionPrefix = isSse ? '(SSE stream) ' : isWs ? '(WebSocket upgrade) ' : '';
         const operation = compact({
-          operationId: `${openApiMethod}_${handlerName}`,
+          operationId: `${openApiMethod}_${ControllerClass.name}_${handlerName}`,
           summary: methodMeta.summary,
           description: methodMeta.description
             ? `${descriptionPrefix}${methodMeta.description}`
@@ -225,7 +225,7 @@ export class OpenAPIGenerator {
     id="api-reference"
     data-url="${specUrl}"
   ></script>
-  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@latest/dist/browser/standalone.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.72.1/dist/browser/standalone.min.js"></script>
 </body>
 </html>`;
   }

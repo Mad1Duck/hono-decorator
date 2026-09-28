@@ -132,8 +132,18 @@ export class Container {
   private resolveViaConstructor<T>(target: ConcreteConstructor<T>): T {
     try {
       const tokens = this.getInjectTokens(target);
+      if (tokens.length === 0 && target.length > 0) {
+        throw new DependencyResolutionError(
+          target,
+          `'${target.name}' declares ${target.length} constructor parameter(s) but no injection tokens. ` +
+          `Did you forget @Injectable([...]) with the dependency classes?`
+        );
+      }
       const dependencies = tokens.map((token, index) => {
         try {
+          if (typeof token === 'function' && this.isRequestScoped(token)) {
+            return this.createRequestScopedProxy(token);
+          }
           return this.resolve(token as ConcreteConstructor);
         } catch (error) {
           throw new DependencyResolutionError(
@@ -153,6 +163,42 @@ export class Container {
         `Failed to instantiate ${target.name}: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
+  }
+
+  /**
+   * Lazy proxy injected in place of a @RequestScoped dependency.
+   * The real instance is resolved per property access inside the active request
+   * scope, so a singleton constructor-injecting it never captures a stale
+   * per-request instance. Access outside a request throws DependencyResolutionError.
+   */
+  private createRequestScopedProxy<T>(token: InjectionToken<T>): T {
+    const name = this.getTokenName(token);
+    const proto = typeof token === 'function' ? (token as ConcreteConstructor<T>).prototype : null;
+    const real = (): object => {
+      if (!getRequestContext()) {
+        throw new DependencyResolutionError(
+          token,
+          `'${name}' is @RequestScoped and was accessed outside a request scope. ` +
+          `Only touch this dependency inside a route handler.`
+        );
+      }
+      return this.resolve(token as ConcreteConstructor<T>) as object;
+    };
+    return new Proxy(Object.create(proto ?? null) as object, {
+      get: (_t, prop) => {
+        const inst = real();
+        const value = Reflect.get(inst, prop);
+        return typeof value === 'function' ? value.bind(inst) : value;
+      },
+      set: (_t, prop, value) => Reflect.set(real(), prop, value),
+      has: (_t, prop) => prop in real(),
+      ownKeys: () => Reflect.ownKeys(real()),
+      getOwnPropertyDescriptor: (_t, prop) => {
+        const desc = Reflect.getOwnPropertyDescriptor(real(), prop);
+        if (desc) desc.configurable = true;
+        return desc;
+      },
+    }) as T;
   }
 
   /** Read explicit injection tokens declared via @Injectable([Token1, Token2, ...]). */
@@ -204,7 +250,10 @@ export class Container {
         return await fn();
       } finally {
         for (const [token, instance] of ctx.diScope) {
-          if (!prevKeys.has(token) && hasOnDestroy(instance)) await instance.onDestroy();
+          if (!prevKeys.has(token)) {
+            if (hasOnDestroy(instance)) await instance.onDestroy();
+            ctx.diScope.delete(token); // a late resolve must not reuse a destroyed instance
+          }
         }
       }
     }
@@ -231,6 +280,8 @@ export class Container {
     for (const instance of instances) {
       if (hasOnDestroy(instance)) await instance.onDestroy();
     }
+    this.singletons.clear();
+    this.factories.clear();
   }
 }
 

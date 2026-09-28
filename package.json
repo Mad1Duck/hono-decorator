@@ -45,8 +45,7 @@
     "websocket",
     "openapi",
     "channels",
-    "bun",
-    "edge"
+    "bun"
   ],
   "peerDependencies": {
     "hono": ">=4",

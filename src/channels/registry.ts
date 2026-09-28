@@ -7,11 +7,11 @@ import { InMemoryChannelAdapter } from './memory.adapter';
  *
  * @example
  * // startup (single instance):
- * import { channels } from 'hono-decorators';
+ * import { channels } from 'hono-forge';
  * // default in-memory, nothing to configure
  *
  * // startup (multi instance):
- * import { channels, RedisChannelAdapter } from 'hono-decorators';
+ * import { channels, RedisChannelAdapter } from 'hono-forge';
  * channels.use(new RedisChannelAdapter(pubClient, subClient));
  *
  * // in controller:

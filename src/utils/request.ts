@@ -24,6 +24,11 @@ export type RequestLogger = (entry: RequestLogEntry) => void | Promise<void>;
 /**
  * Extracts the real client IP, respecting common proxy headers in priority order:
  * CF-Connecting-IP → X-Real-IP → X-Forwarded-For (first) → fallback 'unknown'
+ *
+ * These headers are trusted unconditionally — only use this when your app sits
+ * behind a trusted proxy/load balancer that strips or sets them. A direct client
+ * can spoof any of them, so don't rely on the result alone for rate limiting or
+ * security decisions on an internet-facing app without a proxy.
  */
 export function extractIp(c: Context): string {
   return (

@@ -41,15 +41,24 @@ export class RedisChannelAdapter implements ChannelAdapter {
     const dead: ChannelClient[] = [];
 
     for (const client of clients) {
-      if (client.isAlive()) {
-        await client.send(parsed.event, parsed.data);
-      } else {
-        dead.push(client);
+      let alive = client.isAlive();
+      if (alive) {
+        try {
+          await client.send(parsed.event, parsed.data);
+        } catch {
+          alive = false;
+        }
       }
+      if (!alive) dead.push(client);
     }
 
     for (const client of dead) {
       clients.delete(client);
+    }
+
+    if (clients.size === 0) {
+      this.localClients.delete(channel);
+      await this.sub.unsubscribe(channel);
     }
   }
 
@@ -57,7 +66,12 @@ export class RedisChannelAdapter implements ChannelAdapter {
     const isNew = !this.localClients.has(channel);
     if (isNew) {
       this.localClients.set(channel, new Set());
-      await this.sub.subscribe(channel);
+      try {
+        await this.sub.subscribe(channel);
+      } catch (error) {
+        this.localClients.delete(channel); // roll back — don't poison later subscribes
+        throw error;
+      }
     }
     this.localClients.get(channel)!.add(client);
   }
@@ -67,10 +81,7 @@ export class RedisChannelAdapter implements ChannelAdapter {
     if (!clients) return;
 
     for (const client of clients) {
-      if (client.id === clientId) {
-        clients.delete(client);
-        break;
-      }
+      if (client.id === clientId) clients.delete(client);
     }
 
     if (clients.size === 0) {

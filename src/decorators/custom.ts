@@ -1,5 +1,6 @@
 import type { ZodTypeAny } from 'zod';
 import { txStorage } from '../utils/transaction';
+import { HttpException } from '../core/http-exception';
 import { getRequestContext, createRequestContext, runInRequestContext, type CacheEntry } from '../core/request-context';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -21,7 +22,10 @@ export function Throttle(ms: number) {
     return (async function (this: object, ...args: unknown[]) {
       const now = Date.now();
       const lastCall = lastCallMap.get(this) ?? 0;
-      if (now - lastCall < ms) throw new Error(`Throttled: wait ${ms - (now - lastCall)}ms`);
+      if (now - lastCall < ms) {
+        const retryAfterMs = ms - (now - lastCall);
+        throw HttpException.tooManyRequests(`Throttled: wait ${retryAfterMs}ms`, { meta: { retryAfterMs } });
+      }
       lastCallMap.set(this, now);
       return await (originalFn as AnyFn).apply(this, args);
     }) as unknown as T;

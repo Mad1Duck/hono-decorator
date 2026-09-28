@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import type { ZodType } from 'zod';
+import { HttpException } from '../core/http-exception';
 import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
 
 /* ===============================================================
@@ -19,7 +20,12 @@ import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
 export async function Body<T>(c: Context, schema: ZodType<T>): Promise<T>;
 export async function Body(c: Context): Promise<unknown>;
 export async function Body(c: Context, schema?: ZodType): Promise<unknown> {
-  const raw = await c.req.json() as unknown;
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    throw HttpException.badRequest('Invalid JSON body');
+  }
   return schema ? schema.parseAsync(raw) : raw;
 }
 
@@ -67,7 +73,10 @@ export function Ctx(c: Context): Context {
   return c;
 }
 
-/** Returns the full Hono Context `c`. Same as Ctx(). */
+/**
+ * Returns the full Hono Context `c`. Same as Ctx().
+ * @deprecated Misleading name — it returns the Context, not a Response. Use `Ctx`.
+ */
 export const Res = Ctx;
 
 /* ================= IP / DEVICE / USER-AGENT ================= */
@@ -93,7 +102,13 @@ function parseCookies(header: string): Record<string, string> {
   return Object.fromEntries(
     header.split(';').filter(Boolean).map((s) => {
       const eq = s.indexOf('=');
-      return [s.slice(0, eq).trim(), decodeURIComponent(s.slice(eq + 1).trim())];
+      if (eq === -1) return [s.trim(), ''];
+      const value = s.slice(eq + 1).trim();
+      try {
+        return [s.slice(0, eq).trim(), decodeURIComponent(value)];
+      } catch {
+        return [s.slice(0, eq).trim(), value];
+      }
     })
   );
 }

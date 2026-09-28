@@ -13,6 +13,7 @@ import type {
   RouteMetadata,
   GuardMetadata,
   RateLimitMetadata,
+  CacheMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
 import type { ConcreteConstructor, ControllerConstructor, ControllerInstance } from './types';
@@ -96,13 +97,15 @@ export class HonoRouteBuilder {
         const hasTrailingSlash = url.pathname.endsWith('/') && url.pathname !== '/';
         const needsTrailingSlash = trailingSlashMode === 'add';
 
+        // 301 for GET/HEAD; 308 preserves method + body for the rest
+        const status = (c.req.method === 'GET' || c.req.method === 'HEAD') ? 301 : 308;
         if (needsTrailingSlash && !hasTrailingSlash) {
           url.pathname = url.pathname + '/';
-          return c.redirect(url.toString(), 301);
+          return c.redirect(url.toString(), status);
         }
         if (!needsTrailingSlash && hasTrailingSlash) {
           url.pathname = url.pathname.slice(0, -1) || '/';
-          return c.redirect(url.toString(), 301);
+          return c.redirect(url.toString(), status);
         }
         await next();
       });
@@ -116,7 +119,15 @@ export class HonoRouteBuilder {
     if (!controllerMetadata) return app;
 
     /* ----- Resolve Controller Instance ----- */
-    const controllerInstance = container.resolve(ControllerClass as ConcreteConstructor<T>) as T & ControllerInstance;
+    // Request-scoped controllers are resolved lazily inside each request's DI scope;
+    // everything else is resolved eagerly here so DI errors fail fast at build time.
+    const isControllerRequestScoped = Boolean(meta?.[METADATA_KEYS.REQUEST_SCOPED]);
+    let eagerInstance: (T & ControllerInstance) | undefined;
+    if (!isControllerRequestScoped) {
+      eagerInstance = container.resolve(ControllerClass as ConcreteConstructor<T>) as T & ControllerInstance;
+    }
+    const getController = () =>
+      eagerInstance ?? (container.resolve(ControllerClass as ConcreteConstructor<T>) as T & ControllerInstance);
 
     /* ----- Filter Routes ----- */
     const isPrivateMap = (meta?.[METADATA_KEYS.IS_PRIVATE] as Record<string, boolean> | undefined) ?? {};
@@ -127,7 +138,7 @@ export class HonoRouteBuilder {
     });
 
     for (const route of platformRoutes) {
-      this.registerRoute(app, route, controllerInstance, controllerMetadata.basePath, meta);
+      this.registerRoute(app, route, getController, controllerMetadata.basePath, meta);
     }
 
     return app;
@@ -136,7 +147,7 @@ export class HonoRouteBuilder {
   private static registerRoute(
     app: Hono,
     route: RouteMetadata,
-    controllerInstance: ControllerInstance,
+    getController: () => ControllerInstance,
     basePath: string,
     meta: ClassMeta | null
   ): void {
@@ -191,6 +202,11 @@ export class HonoRouteBuilder {
 
     const isPublicMap = (meta?.[METADATA_KEYS.IS_PUBLIC] as Record<string, boolean> | undefined) ?? {};
 
+    const allCache = (meta?.[METADATA_KEYS.CACHE] as Record<string, CacheMetadata> | undefined) ?? {};
+    const cacheMeta = allCache[handlerName];
+    // Route-level response cache — per route, keyed by custom key + path + query.
+    const routeCache = cacheMeta ? new Map<string, { value: unknown; expires: number; }>() : null;
+
     const routeLabel = `${method.toUpperCase()} ${basePath}${path}`;
 
     /* ----- Build Middleware Chain ----- */
@@ -231,6 +247,7 @@ export class HonoRouteBuilder {
           }
           await next();
         } catch (error) {
+          if (error instanceof HttpException) throw error;
           if (error instanceof Error) {
             if (error.message.includes('Unauthorized')) {
               return c.json({ status: 'error', error: { code: 'UNAUTHORIZED', message: error.message } }, 401);
@@ -242,7 +259,7 @@ export class HonoRouteBuilder {
           throw error;
         }
       };
-      middlewares.push(guardMw);
+      middlewares.push(wrapMiddleware(guardMw));
     }
 
     const fullPath = `${basePath}${path}`;
@@ -267,9 +284,15 @@ export class HonoRouteBuilder {
 
         return streamSSE(c, async (stream) => {
           if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
-          const fn = controllerInstance[handlerName];
-          if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
-          await fn.call(controllerInstance, c, stream);
+          const ctx = createRequestContext(traceId);
+          await runInRequestContext(ctx, () =>
+            container.runInScope(async () => {
+              const inst = getController();
+              const fn = inst[handlerName];
+              if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
+              await fn.call(inst, c, stream);
+            })
+          );
 
           if (requestLogger) {
             await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
@@ -300,9 +323,12 @@ export class HonoRouteBuilder {
 
         if (onRequestStart) await onRequestStart({ method: 'GET', path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
 
-        const fn = controllerInstance[handlerName];
+        // Resolved inside a request context but outside runInScope — WS handlers
+        // return event callbacks immediately while the socket stays open.
+        const inst = runInRequestContext(createRequestContext(traceId), getController);
+        const fn = inst[handlerName];
         if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
-        const result = fn.call(controllerInstance, c);
+        const result = fn.call(inst, c);
 
         if (requestLogger) {
           await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 101, durationMs: Date.now() - startMs, traceId });
@@ -325,15 +351,39 @@ export class HonoRouteBuilder {
 
       if (onRequestStart) await onRequestStart({ method: c.req.method, path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
 
+      let cacheKey: string | undefined;
+      if (routeCache) {
+        const url = new URL(c.req.url);
+        cacheKey = `${cacheMeta!.key ?? handlerName}:${url.pathname}${url.search}`;
+        const hit = routeCache.get(cacheKey);
+        if (hit && hit.expires > Date.now()) {
+          if (requestLogger) {
+            await requestLogger({ method: c.req.method, path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
+          }
+          return c.json(hit.value);
+        }
+        if (hit) routeCache.delete(cacheKey);
+      }
+
       const ctx = createRequestContext(traceId);
       const response = await runInRequestContext(ctx, () =>
         container.runInScope(async () => {
           try {
-            const fn = controllerInstance[handlerName];
+            const inst = getController();
+            const fn = inst[handlerName];
             if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
 
-            const result = await fn.call(controllerInstance, c);
+            const result = await fn.call(inst, c);
             if (result instanceof Response) return result;
+            if (routeCache && cacheKey !== undefined && result !== undefined) {
+              routeCache.set(cacheKey, { value: result, expires: Date.now() + cacheMeta!.ttl });
+              if (routeCache.size > 1000) {
+                const now = Date.now();
+                for (const [k, v] of routeCache) {
+                  if (v.expires <= now) routeCache.delete(k);
+                }
+              }
+            }
             return result !== undefined ? c.json(result) : c.body(null);
           } catch (error: unknown) {
             if (error instanceof ZodError) {

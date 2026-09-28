@@ -12,7 +12,10 @@ type MiddlewareInput = HonoMiddlewareFn | (new () => MiddlewareClass);
 
 function normalize(middlewares: MiddlewareInput[]): HonoMiddlewareFn[] {
   return middlewares.map((m) => {
-    if (isMiddlewareClass(m)) return new m().use.bind(new m());
+    if (isMiddlewareClass(m)) {
+      const instance = new m();
+      return instance.use.bind(instance) as HonoMiddlewareFn;
+    }
     return m as HonoMiddlewareFn;
   });
 }

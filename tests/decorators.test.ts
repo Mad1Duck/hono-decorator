@@ -40,6 +40,7 @@ import {
   METADATA_KEYS,
   getClassMeta,
   getMethodMeta,
+  HttpException,
 } from '../src';
 import type { TransactionExecutor } from '../src';
 import type {
@@ -340,6 +341,16 @@ describe('@Middleware', () => {
     expect(mws).toHaveLength(1);
     expect(mws?.[0]).toBe(fn1);
   });
+
+  it('instantiates a class middleware exactly once', () => {
+    let ctorCalls = 0;
+    class ClassMw {
+      constructor() { ctorCalls++; }
+      async use(_c: Context, next: Next) { return next(); }
+    }
+    Middleware(ClassMw);
+    expect(ctorCalls).toBe(1);
+  });
 });
 
 /* ================= CACHE ================= */
@@ -400,6 +411,16 @@ describe('@Timeout', () => {
     }
     await expect(new Svc().slow()).rejects.toThrow(/Timeout/);
   });
+
+  it('throws HttpException 504 on timeout', async () => {
+    class Svc {
+      @Timeout(10)
+      async slow() { return new Promise(r => setTimeout(r, 500)); }
+    }
+    const err = await new Svc().slow().catch(e => e);
+    expect(err).toBeInstanceOf(HttpException);
+    expect((err as HttpException).status).toBe(504);
+  });
 });
 
 describe('@Transform', () => {
@@ -436,6 +457,17 @@ describe('@TrackMetrics', () => {
     }
     await expect(new Svc().boom()).rejects.toThrow('metric error');
   });
+
+  it('uses ClassName.method as the default metric name', async () => {
+    const names: string[] = [];
+    class Svc {
+      metrics = { trackMethodDuration: (n: string) => names.push(n) };
+      @TrackMetrics()
+      async work() { return 1; }
+    }
+    await new Svc().work();
+    expect(names).toEqual(['Svc.work']);
+  });
 });
 
 /* ================= THROTTLE ================= */
@@ -457,6 +489,19 @@ describe('@Throttle', () => {
     const svc = new Svc();
     await svc.ping();
     await expect(svc.ping()).rejects.toThrow('Throttled');
+  });
+
+  it('throws HttpException 429 with retryAfterMs meta', async () => {
+    class Svc {
+      @Throttle(5000)
+      async ping() { return 'pong'; }
+    }
+    const svc = new Svc();
+    await svc.ping();
+    const err = await svc.ping().catch(e => e);
+    expect(err).toBeInstanceOf(HttpException);
+    expect((err as HttpException).status).toBe(429);
+    expect((err as HttpException).meta?.['retryAfterMs']).toBeGreaterThan(0);
   });
 
   it('two separate instances have independent throttle windows', async () => {

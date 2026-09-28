@@ -1,4 +1,5 @@
 import { METADATA_KEYS } from '../decorators/metadata';
+import { pathToFileURL } from 'node:url';
 import type { ConcreteConstructor } from '../core/types';
 
 type AnyConstructor = ConcreteConstructor<unknown>;
@@ -13,6 +14,9 @@ function isController(exported: unknown): exported is AnyConstructor {
 /**
  * Scans a glob pattern and dynamically imports all files, returning every
  * class decorated with @Controller. Requires Bun runtime (uses Bun.Glob).
+ *
+ * Note: patterns are relative to `options.cwd` (defaults to process.cwd()) —
+ * a leading `./` in the pattern may not match; use `src/**\/*.ts` form.
  *
  * @example
  * const controllers = await discoverControllers('./src/controllers/**\/*.ts');
@@ -38,7 +42,7 @@ export async function discoverControllers(
 
   for await (const file of glob.scan({ cwd })) {
     const absolutePath = `${cwd}/${file}`;
-    const mod = await import(absolutePath) as Record<string, unknown>;
+    const mod = await import(pathToFileURL(absolutePath).href) as Record<string, unknown>;
     extractControllers(mod, controllers);
   }
 

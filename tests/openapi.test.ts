@@ -126,7 +126,7 @@ describe('OpenAPIGenerator.generate', () => {
     });
 
     it('sets operationId', () => {
-      expect(op(generate(ItemController), '/items', 'get')['operationId']).toBe('get_list');
+      expect(op(generate(ItemController), '/items', 'get')['operationId']).toBe('get_ItemController_list');
     });
 
     it('marks deprecated from @ApiDeprecated', () => {

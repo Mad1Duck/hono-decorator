@@ -10,13 +10,18 @@ import {
   All,
   WebSocket,
   Param,
+  Body,
+  Cookie,
+  Cookies,
   Injectable,
   Singleton,
+  RequestScoped,
   RequireAuth,
   RequireRole,
   Public,
   Private,
   RateLimit,
+  Cache,
   Middleware,
   Use,
   Cors,
@@ -331,6 +336,41 @@ describe('HonoRouteBuilder', () => {
       const app = HonoRouteBuilder.build(SecureController);
       const res = await app.fetch(makeRequest('/secure'));
       expect(res.status).toBe(403);
+    });
+
+    it('returns the HttpException status when guardExecutor throws HttpException', async () => {
+      HonoRouteBuilder.configure({
+        guardExecutor: async () => { throw new HttpException(401, 'Token expired'); },
+      });
+      const app = HonoRouteBuilder.build(SecureController);
+      const res = await app.fetch(makeRequest('/secure'));
+      expect(res.status).toBe(401);
+      const body = await res.json() as { error: { code: string; message: string; }; };
+      expect(body.error.code).toBe('UNAUTHORIZED');
+      expect(body.error.message).toBe('Token expired');
+    });
+
+    it('returns 403 for HttpException(403) from guardExecutor', async () => {
+      HonoRouteBuilder.configure({
+        guardExecutor: async () => { throw HttpException.forbidden('Not your resource'); },
+      });
+      const app = HonoRouteBuilder.build(SecureController);
+      const res = await app.fetch(makeRequest('/secure'));
+      expect(res.status).toBe(403);
+      const body = await res.json() as { error: { code: string; }; };
+      expect(body.error.code).toBe('FORBIDDEN');
+    });
+
+    it('calls onError when guardExecutor throws', async () => {
+      const errors: unknown[] = [];
+      HonoRouteBuilder.configure({
+        guardExecutor: async () => { throw new HttpException(401, 'Token expired'); },
+        onError: (err) => { errors.push(err); },
+      });
+      const app = HonoRouteBuilder.build(SecureController);
+      await app.fetch(makeRequest('/secure'));
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(HttpException);
     });
 
     it('allows request when guardExecutor returns true', async () => {
@@ -680,6 +720,172 @@ describe('HonoRouteBuilder', () => {
       const res = await app.fetch(makeRequest('/resp-test/raw'));
       expect(res.status).toBe(201);
       expect(await res.text()).toBe('plain');
+    });
+  });
+
+  /* -------- @RequestScoped injection -------- */
+
+  describe('@RequestScoped injection', () => {
+    it('injects a fresh request-scoped dep into a singleton controller per request', async () => {
+      @Injectable()
+      @RequestScoped()
+      class ReqDep { readonly id = crypto.randomUUID(); }
+
+      @Controller('/req-dep')
+      @Injectable([ReqDep])
+      class ReqDepController {
+        constructor(private dep: ReqDep) {}
+        @Get() @Public()
+        get() { return { id: this.dep.id }; }
+      }
+
+      const app = HonoRouteBuilder.build(ReqDepController);
+      const r1 = await app.fetch(makeRequest('/req-dep'));
+      const r2 = await app.fetch(makeRequest('/req-dep'));
+      const b1 = await r1.json() as { id: string; };
+      const b2 = await r2.json() as { id: string; };
+      expect(b1.id).not.toBe(b2.id);
+    });
+
+    it('shares the same request-scoped instance within one request', async () => {
+      @Injectable()
+      @RequestScoped()
+      class ReqDep { readonly id = crypto.randomUUID(); }
+
+      @Controller('/req-dep')
+      @Injectable([ReqDep])
+      class ReqDepController {
+        constructor(private dep: ReqDep) {}
+        @Get() @Public()
+        get() { return { a: this.dep.id, b: this.dep.id, same: this.dep === this.dep }; }
+      }
+
+      const app = HonoRouteBuilder.build(ReqDepController);
+      const body = await (await app.fetch(makeRequest('/req-dep'))).json() as { a: string; b: string; same: boolean; };
+      expect(body.a).toBe(body.b);
+      expect(body.same).toBe(true);
+    });
+
+    it('supports a @RequestScoped controller class', async () => {
+      @Controller('/req-ctrl')
+      @Injectable()
+      @RequestScoped()
+      class ReqController {
+        readonly id = crypto.randomUUID();
+        @Get() @Public()
+        get() { return { id: this.id }; }
+      }
+
+      const app = HonoRouteBuilder.build(ReqController);
+      const b1 = await (await app.fetch(makeRequest('/req-ctrl'))).json() as { id: string; };
+      const b2 = await (await app.fetch(makeRequest('/req-ctrl'))).json() as { id: string; };
+      expect(b1.id).not.toBe(b2.id);
+    });
+
+    it('destroys request-scoped deps at end of request', async () => {
+      const destroyed: string[] = [];
+      @Injectable()
+      @RequestScoped()
+      class ReqDep {
+        readonly id = crypto.randomUUID();
+        onDestroy() { destroyed.push(this.id); }
+      }
+
+      @Controller('/req-dep')
+      @Injectable([ReqDep])
+      class ReqDepController {
+        constructor(private dep: ReqDep) {}
+        @Get() @Public()
+        get() { return { id: this.dep.id }; }
+      }
+
+      const app = HonoRouteBuilder.build(ReqDepController);
+      const body = await (await app.fetch(makeRequest('/req-dep'))).json() as { id: string; };
+      expect(destroyed).toEqual([body.id]);
+    });
+  });
+
+  /* -------- malformed input -------- */
+
+  describe('malformed input', () => {
+    it('returns 400 (not 500) for invalid JSON in Body()', async () => {
+      @Controller('/body-test')
+      class BodyController {
+        @Post() @Public()
+        async create(c: Context) { return { body: await Body(c) }; }
+      }
+      const app = HonoRouteBuilder.build(BodyController);
+      const res = await app.fetch(makeRequest('/body-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{invalid json',
+      }));
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { code: string; }; };
+      expect(body.error.code).toBe('BAD_REQUEST');
+    });
+
+    it('handles malformed cookie encoding without crashing', async () => {
+      @Controller('/cookie-test')
+      class CookieController {
+        @Get() @Public()
+        read(c: Context) { return { session: Cookie(c, 'session'), flag: Cookies(c)['flag'] }; }
+      }
+      const app = HonoRouteBuilder.build(CookieController);
+      const res = await app.fetch(makeRequest('/cookie-test', {
+        headers: { cookie: 'session=%ZZ; plain=1; flag' },
+      }));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { session: string; flag: string; };
+      expect(body.session).toBe('%ZZ');
+      expect(body.flag).toBe('');
+    });
+  });
+
+  /* -------- @Cache -------- */
+
+  describe('@Cache', () => {
+    it('serves the second request from cache without re-invoking the handler', async () => {
+      let calls = 0;
+      @Controller('/cache-test')
+      class CacheController {
+        @Get() @Public() @Cache({ ttl: 60_000 })
+        list() { calls++; return { n: calls }; }
+      }
+      const app = HonoRouteBuilder.build(CacheController);
+      const b1 = await (await app.fetch(makeRequest('/cache-test'))).json() as { n: number; };
+      const b2 = await (await app.fetch(makeRequest('/cache-test'))).json() as { n: number; };
+      expect(b1.n).toBe(1);
+      expect(b2.n).toBe(1);
+      expect(calls).toBe(1);
+    });
+
+    it('does not share cache across different path params or queries', async () => {
+      let calls = 0;
+      @Controller('/cache-item')
+      class CacheItemController {
+        @Get('/:id') @Public() @Cache({ ttl: 60_000 })
+        get(c: Context) { calls++; return { id: Param(c, 'id'), n: calls }; }
+      }
+      const app = HonoRouteBuilder.build(CacheItemController);
+      const a = await (await app.fetch(makeRequest('/cache-item/1'))).json() as { n: number; };
+      const b = await (await app.fetch(makeRequest('/cache-item/2'))).json() as { n: number; };
+      expect(a.n).toBe(1);
+      expect(b.n).toBe(2);
+    });
+
+    it('expires entries after ttl', async () => {
+      let calls = 0;
+      @Controller('/cache-ttl')
+      class CacheTtlController {
+        @Get() @Public() @Cache({ ttl: 30 })
+        list() { calls++; return { n: calls }; }
+      }
+      const app = HonoRouteBuilder.build(CacheTtlController);
+      await app.fetch(makeRequest('/cache-ttl'));
+      await new Promise(r => setTimeout(r, 60));
+      await app.fetch(makeRequest('/cache-ttl'));
+      expect(calls).toBe(2);
     });
   });
 
