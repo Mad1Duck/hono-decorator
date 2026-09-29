@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v4.0.0...v5.0.0) (2026-09-29)
+
+### Features
+
+* add CI, Node smoke test, rate-limit headers, event wildcards, and repo hygiene ([79699bd](https://github.com/Mad1Duck/hono-decorator/commit/79699bd1a5a9957977aa8ad94c6e1790cdb4c5b4))
+* add config validation, event bus, scheduler, circuit breaker, request context API, versioning, and status decorators ([5a1e55c](https://github.com/Mad1Duck/hono-decorator/commit/5a1e55c640fe418c4c7ef0f92eb7fc4ed6659d5c))
+* add operational helpers, idempotency, single-flight, SSE keepalive, and logger DI ([f8cf07a](https://github.com/Mad1Duck/hono-decorator/commit/f8cf07aa7b27a376ce91438a1ce4d69dcb447231))
+
 ## [4.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v3.3.0...v4.0.0) (2026-09-28)
 
 ### ⚠ BREAKING CHANGES
