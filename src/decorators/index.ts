@@ -14,4 +14,5 @@ export * from './module';
 export * from './resilience';
 export * from './schedule';
 export * from './sse';
+export * from './validate';
 export * from './websocket';

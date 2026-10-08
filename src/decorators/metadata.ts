@@ -115,9 +115,11 @@ export type HonoMiddlewareFn = (c: Context, next: Next) => Promise<Response | vo
 
 /* ================= VALIDATION ================= */
 
+/** @Validate — pre-handler Zod validation; schemas also feed the OpenAPI spec. */
 export interface ValidationMetadata {
-  type: 'body' | 'query' | 'params';
-  schema: ZodType;
+  body?: ZodType;
+  query?: ZodType;
+  params?: ZodType;
 }
 
 /* ================= OPENAPI ================= */
@@ -131,6 +133,8 @@ export interface OpenAPIMetadata {
   responses?: Record<number, { description?: string; schema?: ZodType; }>;
   body?: { schema: ZodType; required?: boolean; description?: string; };
   query?: Record<string, { schema: ZodType; required?: boolean; description?: string; }>;
+  /** Path-param schemas — populated by @Validate({ params }). */
+  params?: Record<string, { schema: ZodType; description?: string; }>;
 }
 
 /* ================= CACHE ================= */

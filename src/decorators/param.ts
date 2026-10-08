@@ -15,18 +15,29 @@ import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
  *   }
  * =============================================================== */
 
+/* ================= VALIDATED CONTEXT KEYS ================= */
+// Set by the @Validate middleware before the handler runs.
+
+export const VALIDATED_BODY = 'hono-forge:validatedBody';
+export const VALIDATED_QUERY = 'hono-forge:validatedQuery';
+export const VALIDATED_PARAMS = 'hono-forge:validatedParams';
+
 /* ================= BODY ================= */
 
 export async function Body<T>(c: Context, schema: ZodType<T>): Promise<T>;
-export async function Body(c: Context): Promise<unknown>;
-export async function Body(c: Context, schema?: ZodType): Promise<unknown> {
+export async function Body<T = unknown>(c: Context): Promise<T>;
+export async function Body<T>(c: Context, schema?: ZodType<T>): Promise<T> {
+  if (!schema) {
+    const cached = c.get(VALIDATED_BODY);
+    if (cached !== undefined) return cached as T;
+  }
   let raw: unknown;
   try {
     raw = await c.req.json();
   } catch {
     throw HttpException.badRequest('Invalid JSON body');
   }
-  return schema ? schema.parseAsync(raw) : raw;
+  return (schema ? await schema.parseAsync(raw) : raw) as T;
 }
 
 /* ================= PARAM ================= */
@@ -38,13 +49,23 @@ export function Param(c: Context, name?: string): string | Record<string, string
   return c.req.param() as Record<string, string>;
 }
 
+/**
+ * Returns all route params as an object — the @Validate-parsed, correctly-typed
+ * version when @Validate({ params }) is set on the route, raw strings otherwise.
+ */
+export function Params<T = Record<string, string>>(c: Context): T {
+  const cached = c.get(VALIDATED_PARAMS);
+  return (cached !== undefined ? cached : c.req.param()) as T;
+}
+
 /* ================= QUERY ================= */
 
 export async function Query<T>(c: Context, schema: ZodType<T>): Promise<T>;
-export function Query(c: Context): Record<string, string>;
-export function Query(c: Context, schema?: ZodType): unknown {
-  const raw = c.req.query();
-  return schema ? schema.parseAsync(raw) : raw;
+export function Query<T = Record<string, string>>(c: Context): T;
+export function Query<T>(c: Context, schema?: ZodType<T>): T | Promise<T> {
+  if (schema) return schema.parseAsync(c.req.query()) as Promise<T>;
+  const cached = c.get(VALIDATED_QUERY);
+  return (cached !== undefined ? cached : c.req.query()) as T;
 }
 
 /* ================= HEADERS ================= */

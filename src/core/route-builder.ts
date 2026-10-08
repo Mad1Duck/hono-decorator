@@ -25,8 +25,10 @@ import type {
   HeadersMetadata,
   RedirectMetadata,
   ResponseStatusMetadata,
+  ValidationMetadata,
   HonoMiddlewareFn,
 } from '../decorators/metadata';
+import { VALIDATED_BODY, VALIDATED_PARAMS, VALIDATED_QUERY } from '../decorators/param';
 import type { SseOptions } from '../decorators/sse';
 import type { ExceptionFilter, ExceptionFilterConstructor } from '../decorators/filters';
 import { channels } from '../channels/registry';
@@ -347,6 +349,14 @@ export class HonoRouteBuilder {
     return app;
   }
 
+  /**
+   * All controller classes reachable from a @Module (imports traversed,
+   * deduplicated). Useful for OpenAPIGenerator / typed client codegen.
+   */
+  static moduleControllers(ModuleClass: Function): ControllerConstructor[] {
+    return this.collectModule(ModuleClass, new Set()).controllers as ControllerConstructor[];
+  }
+
   private static collectModule(
     ModuleClass: Function,
     seen: Set<Function>
@@ -502,6 +512,30 @@ export class HonoRouteBuilder {
         }
       };
       middlewares.push(wrapMiddleware(guardMw));
+    }
+
+    const allValidation = (meta?.[METADATA_KEYS.VALIDATION] as Record<string, ValidationMetadata> | undefined) ?? {};
+    const validateMeta = allValidation[handlerName];
+    if (validateMeta && (validateMeta.body || validateMeta.query || validateMeta.params)) {
+      const validateMw: HonoMiddlewareFn = async (c, next) => {
+        if (validateMeta.body) {
+          let raw: unknown;
+          try {
+            raw = await c.req.json();
+          } catch {
+            throw HttpException.badRequest('Invalid JSON body');
+          }
+          c.set(VALIDATED_BODY, await validateMeta.body.parseAsync(raw));
+        }
+        if (validateMeta.query) {
+          c.set(VALIDATED_QUERY, await validateMeta.query.parseAsync(c.req.query()));
+        }
+        if (validateMeta.params) {
+          c.set(VALIDATED_PARAMS, await validateMeta.params.parseAsync(c.req.param()));
+        }
+        return next();
+      };
+      middlewares.push(wrapMiddleware(validateMw));
     }
 
     const fullPath = `${basePath}${path}`;

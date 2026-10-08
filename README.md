@@ -10,6 +10,7 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Context helpers** — `Body`, `Param`, `Query`, `Headers`, `User`, `Ip`, `Device`, `Cookie`, `UploadedFile` and more — typed functions called inside the handler with `c` as first arg
 - **Dependency injection** — `@Injectable([deps])`, `@Singleton`, `@RequestScoped`, circular dependency detection, lifecycle hooks
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
+- **`@Validate`** — one Zod schema drives both request validation and the OpenAPI spec
 - **Rate limiting** — `@RateLimit` works out of the box (in-memory), pluggable to Redis via factory
 - **Idempotency** — `@Idempotent` replays responses per `Idempotency-Key`; `@SingleFlight` dedupes concurrent identical requests
 - **Middleware** — `@Middleware` / `@Use` at class or method level; built-in `@Cors`, `@Compress`, `@SecureHeaders`, `@PrettyJson`
@@ -169,6 +170,25 @@ app.route('/', HonoRouteBuilder.buildModule(AppModule));
 
 `imports` are traversed recursively and deduped; `providers` are eagerly resolved at build time so DI errors fail fast (except `@RequestScoped`, resolved per request). Modules organize wiring — they do not create isolated DI scopes or configs.
 
+## App bootstrap — `createApp`
+
+One call wires everything a typical app needs — no manual plumbing for health checks, docs, or shutdown:
+
+```ts
+import { createApp } from 'hono-forge';
+
+const app = createApp(AppModule, {
+  health: { checks: { db: () => db.ping(), redis: () => redis.ping() } }, // GET /health
+  openapi: { info: { title: 'My API', version: '1.0.0' } },              // GET /docs + /openapi.json
+  printRoutes: true,                                                     // route table at startup
+  shutdown: { timeoutMs: 10_000, onShutdown: async () => stopWorkers() },
+});
+
+export default app;
+```
+
+Every option is optional — `createApp(AppModule)` alone is equivalent to `buildModule` + `app.route`. Controllers for the OpenAPI spec are collected from the module automatically; also available as `HonoRouteBuilder.moduleControllers(Module)` for custom wiring.
+
 ## Auto-discovery
 
 Avoid manually listing every controller. Use `discoverControllers` (Bun runtime) or `fromModules` (any bundler):
@@ -214,6 +234,10 @@ class UserService { constructor(private email: EmailService) {} }
 ```
 
 For zero dependencies, `@Injectable()` or `@Injectable([])` is equivalent.
+
+> **Note:** the token array is resolved at runtime — TypeScript cannot check it
+> against constructor parameters (a TC39 decorator limitation). `buildModule`
+> eagerly resolves providers so missing/mismatched deps fail at boot, not mid-request.
 
 ### `@Singleton()`
 
@@ -649,11 +673,12 @@ class AuditRepo {
 | Helper | Returns | Notes |
 |---|---|---|
 | `await Body(c, schema)` | `z.infer<schema>` | Parse + validate body |
-| `await Body(c)` | `unknown` | Raw body, no validation |
+| `await Body(c)` | `unknown` | Validated body if `@Validate` is set, else raw body |
 | `Param(c, 'id')` | `string` | Route param |
-| `Param(c)` | `Record<string, string>` | All route params |
+| `Param(c)` | `Record<string, string>` | All route params (raw) |
+| `Params<T>(c)` | `T` | Route params object — `@Validate`-parsed when set |
 | `await Query(c, schema)` | `z.infer<schema>` | Validated query params |
-| `Query(c)` | `Record<string, string>` | All query params, no validation |
+| `Query<T>(c)` | `T` | Validated query object if `@Validate` is set, else `Record<string, string>` |
 | `Headers(c, 'x-tok')` | `string \| undefined` | Single header |
 | `Headers(c)` | `Record<string, string>` | All headers |
 | `User<T>(c)` | `T` | `c.get('user')` — set by guard |
@@ -708,6 +733,42 @@ async uploadMany(c: Context) {
   return files.map(f => ({ name: f.name, size: f.size }));
 }
 ```
+
+---
+
+## Validation — `@Validate`
+
+One source of truth for **validation AND OpenAPI documentation**. Declare the schemas once: the route validates before your handler runs (`400 VALIDATION_ERROR` on failure), and the same schemas are emitted into the generated spec — no `@ApiBody`/`@ApiQuery` duplication, so docs can't drift from validation.
+
+```ts
+const CreateUserSchema = z.object({
+  name: z.string().min(1),
+  email: z.string().email(),
+  role: z.string().default('member'),
+});
+
+@Post()
+@Validate({ body: CreateUserSchema })
+async create(c: Context) {
+  const body = await Body<z.infer<typeof CreateUserSchema>>(c); // already validated
+  return this.svc.create(body);
+}
+
+@Get('/:id')
+@Validate({
+  params: z.object({ id: z.string().uuid() }),             // → typed path param in spec
+  query:  z.object({ verbose: z.coerce.boolean().default(false) }),
+})
+async getOne(c: Context) {
+  const { id }      = Params<{ id: string }>(c);            // parsed route params
+  const { verbose } = Query<{ verbose: boolean }>(c);      // parsed + coerced query
+  return this.svc.find(id, verbose);
+}
+```
+
+- Invalid body/query/params → `400` with `VALIDATION_ERROR` and Zod `issues` in `details`.
+- `Body(c)` / `Query(c)` / `Params(c)` return the **already-validated** values (including schema transforms and defaults) — passing a schema again still works for ad-hoc validation.
+- `@ApiBody`/`@ApiQuery` can still be layered on top for `description`/`required` overrides — their metadata merges.
 
 ---
 

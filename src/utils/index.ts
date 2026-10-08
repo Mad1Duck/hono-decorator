@@ -23,3 +23,5 @@ export { mountHealth } from './health';
 export type { HealthCheck, HealthCheckResult, HealthOptions } from './health';
 export { gracefulShutdown } from './shutdown';
 export type { GracefulShutdownOptions } from './shutdown';
+export { createApp } from './app';
+export type { CreateAppOptions } from './app';

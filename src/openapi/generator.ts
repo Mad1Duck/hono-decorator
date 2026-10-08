@@ -105,6 +105,7 @@ export class OpenAPIGenerator {
       const isPublicMap = (meta[METADATA_KEYS.IS_PUBLIC] as Record<string, boolean> | undefined) ?? {};
       const allSse = (meta[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
       const allWs = (meta[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
+      const allChannels = (meta[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, string | ((c: unknown) => string)> | undefined) ?? {};
 
       for (const route of routes) {
         if (route.method === 'all') continue;
@@ -119,6 +120,7 @@ export class OpenAPIGenerator {
         const isPublic = isPublicMap[handlerName] ?? false;
         const isSse = allSse[handlerName] ?? false;
         const isWs = allWs[handlerName] ?? false;
+        const channelMeta = allChannels[handlerName];
 
         /* --- Tags --- */
         const tags = [...(classOpenApi.tags ?? []), ...(methodMeta.tags ?? [])];
@@ -129,11 +131,18 @@ export class OpenAPIGenerator {
         );
         if (needsAuth) needsBearerAuth = true;
 
-        /* --- Path parameters (inferred from URL) + @ApiQuery --- */
+        /* --- Path parameters (inferred from URL; @Validate/@ApiDoc may refine the schema) + @ApiQuery --- */
         const pathParamNames = extractPathParamNames(honoFullPath);
-        const parameters: unknown[] = pathParamNames.map(name =>
-          compact({ name, in: 'path', required: true, schema: { type: 'string' } })
-        );
+        const parameters: unknown[] = pathParamNames.map(name => {
+          const p = methodMeta.params?.[name];
+          return compact({
+            name,
+            in: 'path',
+            required: true,
+            description: p?.description,
+            schema: p ? zodToJsonSchema(p.schema) : { type: 'string' },
+          });
+        });
         for (const [qname, q] of Object.entries(methodMeta.query ?? {})) {
           parameters.push(compact({
             name: qname,
@@ -177,6 +186,10 @@ export class OpenAPIGenerator {
           deprecated: methodMeta.deprecated,
           security: needsAuth ? [{ bearerAuth: [] }] : isPublic ? [] : undefined,
           parameters: parameters.length > 0 ? parameters : undefined,
+          /* Vendor extensions — ignored by OpenAPI tooling, consumed by smarter
+           * clients (e.g. api-tester) to build protocol-aware nodes. */
+          'x-transport': isSse ? 'sse' : isWs ? 'websocket' : undefined,
+          'x-channel': typeof channelMeta === 'string' ? channelMeta : undefined,
           requestBody: methodMeta.body
             ? compact({
               required: methodMeta.body.required ?? !methodMeta.body.schema.safeParse(undefined).success,
