@@ -17,7 +17,7 @@ export interface Logger {
  * `container.registerInstance(LOGGER, logger)`, then inject `LOGGER` like any
  * other injection token.
  */
-export const LOGGER: unique symbol = Symbol('hono-forge:logger');
+export const LOGGER: unique symbol = Symbol.for('hono-forge:logger');
 
 /** Default logger backed by `console` — used when nothing is registered. */
 export class ConsoleLogger implements Logger {

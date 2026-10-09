@@ -9,7 +9,7 @@ import { container } from './container';
  * @Injectable([CONFIG])
  * class DbService { constructor(private cfg: AppConfig) {} }
  */
-export const CONFIG: unique symbol = Symbol('hono-forge:config');
+export const CONFIG: unique symbol = Symbol.for('hono-forge:config');
 
 /**
  * Parse `source` (default `process.env`) against a Zod schema **once** and

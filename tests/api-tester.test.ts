@@ -15,6 +15,7 @@ import {
   WebSocket,
 } from '../src';
 import {
+  generateFlowFile,
   generateFlowFiles,
   stringifyFlowFile,
   type ApiTesterFlowFile,
@@ -134,6 +135,29 @@ describe('generateFlowFiles', () => {
     const ws = file.nodes.find(n => n.label.includes('/ws'))!.config as ApiTesterWsConfig;
     expect(ws.type).toBe('ws');
     expect(ws.url).toBe('ws://localhost:4000/todos/ws');
+  });
+});
+
+describe('generateFlowFile (single file)', () => {
+  const { file } = generateFlowFile(TodoModule, { baseUrl: 'http://localhost:4000' });
+
+  test('one file for the whole module with a group per controller', () => {
+    expect(file.name).toBe('Todo flow');
+    expect(file.groups).toHaveLength(1);
+    expect(file.groups![0]!.label).toBe('Todo');
+    expect(file.nodes.every(n => n.groupId === file.groups![0]!.id)).toBe(true);
+    // group covers the node column
+    expect(file.groups![0]!.size.height).toBeGreaterThanOrEqual(file.nodes.length * 110);
+  });
+
+  test('node positions are relative to their group', () => {
+    expect(file.nodes[0]!.position).toEqual({ x: 20, y: 40 });
+  });
+
+  test('round-trips through YAML with groups intact', () => {
+    const parsed = Bun.YAML.parse(stringifyFlowFile(file)) as ApiTesterFlowFile;
+    expect(parsed.groups).toHaveLength(1);
+    expect(parsed.nodes.filter(n => n.groupId)).toHaveLength(file.nodes.length);
   });
 });
 

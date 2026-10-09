@@ -1676,6 +1676,21 @@ await writeFlowFiles('./flows', AppModule, { baseUrl: 'http://localhost:3000' })
 
 `generateFlowFiles(target)` returns the file objects (accepts a `@Module`, a controller, or an array) if you'd rather inspect or post-process; `stringifyFlowFile(file)` serializes to YAML. Flow ids are deterministic — re-exporting the same controller keeps the id so re-imports update the existing flow instead of duplicating it.
 
+**CLI** — no script needed:
+
+```bash
+bunx hono-forge flows ./src/app.module.ts --out ./flows --base-url http://localhost:3000
+bunx hono-forge flows ./src/app.module.ts --single   # one file, a group per controller
+```
+
+`--export <name>` picks a specific export when the entry file exports several modules. TypeScript entry files require Bun (or a pre-built JS entry under plain Node).
+
+**Single-file mode** — `generateFlowFile` / `writeFlowFile` emit one `.flow.yaml` where each controller becomes a visual group of linearly-chained nodes:
+
+```ts
+await writeFlowFile('./flows', AppModule); // → flows/app.flow.yaml
+```
+
 See a runnable example in `examples/todo-api/export-flows.ts`.
 
 ## Testing
