@@ -470,3 +470,55 @@ describe('Container', () => {
     });
   });
 });
+
+describe('Container.describe / printGraph', () => {
+  it('reports scope, dependencies, and registration kind without resolving', () => {
+    const c = new Container();
+
+    class Db {}
+    @Injectable([Db])
+    @Singleton()
+    class Repo {}
+    @RequestScoped()
+    class Ctx2 {}
+    @Stateless()
+    @Singleton()
+    class Pure {}
+
+    c.registerFactory('STR_TOKEN', () => 'x');
+
+    const rows = c.describe([Repo, Ctx2, Pure]);
+    const byName = new Map(rows.map(r => [r.name, r]));
+
+    expect(byName.get('Repo')).toMatchObject({
+      scope: 'singleton', dependencies: ['Db'], missing: ['Db'], registered: 'class', resolved: false,
+    });
+    expect(byName.get('Ctx2')!.scope).toBe('request');
+    expect(byName.get('Pure')!.scope).toBe('stateless');
+    expect(byName.get('STR_TOKEN')).toMatchObject({ registered: 'factory', resolved: false });
+  });
+
+  it('marks deps as satisfied when they are in the described set', () => {
+    const c = new Container();
+    class Db {}
+    @Injectable([Db])
+    class Repo {}
+    const rows = c.describe([Repo, Db]);
+    expect(rows.find(r => r.name === 'Repo')!.missing).toEqual([]);
+  });
+
+  it('printGraph warns about missing deps', () => {
+    const c = new Container();
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (m: string) => logs.push(String(m));
+    try {
+      @Injectable([class Missing {}])
+      class Needs {}
+      c.printGraph([Needs]);
+    } finally {
+      console.log = orig;
+    }
+    expect(logs.join('\n')).toContain('missing: \'Missing\'');
+  });
+});

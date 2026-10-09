@@ -129,6 +129,7 @@ import {
   Singleton,
   Post,
   Delete,
+  redisRateLimiter,
 } from '../src';
 import { z } from 'zod';
 
@@ -369,5 +370,53 @@ describe('@OnEvent wildcards', () => {
     stop();
 
     expect(hits).toEqual(['1', '2']);
+  });
+});
+
+describe('redisRateLimiter', () => {
+  function fakeRedis() {
+    const store = new Map<string, { count: number; expiresAt: number }>();
+    return {
+      async incr(key: string) {
+        const now = Date.now();
+        let e = store.get(key);
+        if (!e || e.expiresAt <= now) { e = { count: 0, expiresAt: now + 60_000 }; store.set(key, e); }
+        return ++e.count;
+      },
+      async pexpire(key: string, ms: number) {
+        const e = store.get(key);
+        if (e) e.expiresAt = Date.now() + ms;
+        return 1;
+      },
+      async pttl(key: string) {
+        const e = store.get(key);
+        return e ? Math.max(0, e.expiresAt - Date.now()) : -1;
+      },
+    };
+  }
+
+  it('shares counters across instances via the injected client', async () => {
+    const redis = fakeRedis();
+    const factory = redisRateLimiter(redis);
+    const limiterA = factory({ max: 2, windowMs: 60_000, keyPrefix: 'route:' });
+    const limiterB = factory({ max: 2, windowMs: 60_000, keyPrefix: 'route:' }); // "second instance"
+    const c = { req: { header: () => undefined, raw: { headers: new Map() } }, header: () => {}, } as any;
+
+    await limiterA(c, async () => {}); // 1
+    await limiterB(c, async () => {}); // 2 — B sees A's hit
+    await expect(limiterA(c, async () => {})).rejects.toMatchObject({ status: 429 }); // 3 → limited
+  });
+
+  it('emits X-RateLimit headers from redis state', async () => {
+    const redis = fakeRedis();
+    const headers: Record<string, string> = {};
+    const c = {
+      req: { header: () => undefined, raw: { headers: new Map() } },
+      header: (k: string, v: string) => { headers[k] = v; },
+    } as any;
+    await redisRateLimiter(redis)({ max: 5, windowMs: 30_000, keyPrefix: 'k:' })(c, async () => {});
+    expect(headers['X-RateLimit-Limit']).toBe('5');
+    expect(headers['X-RateLimit-Remaining']).toBe('4');
+    expect(Number(headers['X-RateLimit-Reset'])).toBeGreaterThan(0);
   });
 });

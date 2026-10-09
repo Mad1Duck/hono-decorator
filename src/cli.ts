@@ -1,24 +1,31 @@
 #!/usr/bin/env node
+import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getClassMeta, METADATA_KEYS } from './decorators/metadata';
+import { HonoRouteBuilder } from './core/route-builder';
+import { container } from './core/container';
+import { OpenAPIGenerator } from './openapi/generator';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
 
 const HELP = `hono-forge — CLI
 
 Usage:
-  hono-forge flows <entry-file> [options]
-
-  Generates api-tester flow files (.flow.yaml) from your decorated
-  controllers — import them via "Import flow" in api-tester.
+  hono-forge flows   <entry-file> [options]   api-tester .flow.yaml files
+  hono-forge openapi <entry-file> [options]   OpenAPI 3.1 spec → JSON file
+  hono-forge routes  <entry-file> [options]   print the route table
+  hono-forge graph   <entry-file> [options]   print the DI dependency graph
 
 Options:
-  --out <dir>        Output directory (default: ./flows)
-  --base-url <url>   baseUrl for flow settings (default: http://localhost:3000)
-  --single           Write one .flow.yaml with a group per controller
-                     (default: one file per controller)
-  --export <name>    Named export to use when the file exports several
+  --out <path>       flows: output dir (default ./flows)
+                     openapi: output file (default ./openapi.json)
+  --base-url <url>   flows: baseUrl for flow settings
+                     (default: http://localhost:3000)
+  --single           flows: one .flow.yaml with a group per controller
+  --export <name>    Named export when the file exports several
                      @Module/@Controller classes
+  --title <text>     openapi: info.title (default: entry file name)
+  --version <ver>    openapi: info.version (default: 1.0.0)
   -h, --help         Show this help
 
 The entry file must export your @Module class (or @Controller classes).
@@ -28,15 +35,17 @@ TypeScript entry files need Bun: bunx hono-forge flows ./src/app.module.ts
 interface CliArgs {
   command?: string;
   entry?: string;
-  out: string;
+  out?: string;
   baseUrl: string;
   single: boolean;
   exportName?: string;
+  title?: string;
+  version?: string;
   help: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { out: './flows', baseUrl: 'http://localhost:3000', single: false, help: false };
+  const args: CliArgs = { baseUrl: 'http://localhost:3000', single: false, help: false };
   const rest = [...argv];
   args.command = rest.shift();
   for (let i = 0; i < rest.length; i++) {
@@ -45,6 +54,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--base-url') args.baseUrl = rest[++i]!;
     else if (a === '--single') args.single = true;
     else if (a === '--export') args.exportName = rest[++i]!;
+    else if (a === '--title') args.title = rest[++i]!;
+    else if (a === '--version') args.version = rest[++i]!;
     else if (a === '-h' || a === '--help') args.help = true;
     else if (!a.startsWith('-') && !args.entry) args.entry = a;
     else fail(`Unknown argument: ${a}`);
@@ -85,8 +96,10 @@ function resolveTarget(mod: Record<string, unknown>, exportName?: string): Funct
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !args.command) { console.log(HELP); return; }
-  if (args.command !== 'flows') fail(`Unknown command: '${args.command}'`);
-  if (!args.entry) fail('Missing <entry-file> — e.g. hono-forge flows ./src/app.module.ts');
+  if (!['flows', 'openapi', 'routes', 'graph'].includes(args.command)) {
+    fail(`Unknown command: '${args.command}'`);
+  }
+  if (!args.entry) fail(`Missing <entry-file> — e.g. hono-forge ${args.command} ./src/app.module.ts`);
 
   const entryPath = resolve(process.cwd(), args.entry);
   let mod: Record<string, unknown>;
@@ -95,19 +108,57 @@ async function main(): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/unknown file extension|ERR_UNKNOWN_FILE_EXTENSION|Cannot find module/i.test(msg)) {
-      fail(`Could not load '${args.entry}'. TypeScript files need Bun — run: bunx hono-forge flows ${args.entry}`);
+      fail(`Could not load '${args.entry}'. TypeScript files need Bun — run: bunx hono-forge ${args.command} ${args.entry}`);
     }
     throw err;
   }
 
   const target = resolveTarget(mod, args.exportName);
-  const opts = { baseUrl: args.baseUrl };
 
+  if (args.command === 'routes') {
+    for (const t of Array.isArray(target) ? target : [target]) {
+      HonoRouteBuilder.printRoutes(t);
+    }
+    return;
+  }
+
+  if (args.command === 'graph') {
+    for (const t of Array.isArray(target) ? target : [target]) {
+      const isModule = getClassMeta(t, METADATA_KEYS.MODULE) !== undefined;
+      container.printGraph(
+        isModule
+          ? [...HonoRouteBuilder.moduleProviders(t), ...HonoRouteBuilder.moduleControllers(t)] as Function[]
+          : [t],
+      );
+    }
+    return;
+  }
+
+  const controllers = (Array.isArray(target) ? target : [target]).flatMap(t =>
+    getClassMeta(t, METADATA_KEYS.MODULE) !== undefined
+      ? (HonoRouteBuilder.moduleControllers(t) as Function[])
+      : [t],
+  );
+
+  if (args.command === 'openapi') {
+    const out = args.out ?? './openapi.json';
+    const spec = OpenAPIGenerator.generate(controllers as any, {
+      info: {
+        title: args.title ?? (Array.isArray(target) ? 'API' : target.name.replace(/Module$|Controller$/, '') || 'API'),
+        version: args.version ?? '1.0.0',
+      },
+    });
+    await writeFile(resolve(process.cwd(), out), JSON.stringify(spec, null, 2), 'utf8');
+    console.log(`Wrote ${resolve(process.cwd(), out)}`);
+    return;
+  }
+
+  const out = args.out ?? './flows';
   if (args.single) {
-    const path = await writeFlowFile(args.out, target, opts);
+    const path = await writeFlowFile(out, target, { baseUrl: args.baseUrl });
     console.log(`Wrote ${path}`);
   } else {
-    const paths = await writeFlowFiles(args.out, target, opts);
+    const paths = await writeFlowFiles(out, target, { baseUrl: args.baseUrl });
     console.log(`Wrote ${paths.length} flow file(s):`);
     for (const p of paths) console.log(`  • ${p}`);
   }

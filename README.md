@@ -873,7 +873,18 @@ async login(c: Context) {
 }
 ```
 
-For multi-instance deployments, swap in a shared backend via `rateLimiterFactory`:
+For multi-instance deployments, swap in a shared backend via `rateLimiterFactory` — `redisRateLimiter` is built in (fixed-window `INCR` + `PEXPIRE`; the client is injected, ioredis-compatible):
+
+```ts
+import Redis from 'ioredis';
+import { redisRateLimiter } from 'hono-forge';
+
+HonoRouteBuilder.configure({
+  rateLimiterFactory: redisRateLimiter(new Redis()),
+});
+```
+
+Or roll your own factory:
 
 ```ts
 HonoRouteBuilder.configure({
@@ -1617,6 +1628,30 @@ HonoRouteBuilder.printRoutes(AppModule); // or a controller class
 
 Pure metadata read — nothing is instantiated. Great for verifying wiring at startup during development.
 
+### DI graph — `container.describe()` / `printGraph`
+
+Introspect the dependency graph without resolving anything:
+
+```ts
+import { container, HonoRouteBuilder } from 'hono-forge';
+
+// structured snapshot — scope, deps, registration kind, missing deps
+container.describe([
+  ...HonoRouteBuilder.moduleProviders(AppModule),
+  ...HonoRouteBuilder.moduleControllers(AppModule),
+]);
+
+// or pretty-print it
+container.printGraph([...]);
+// DI graph — 5 provider(s)
+//   TodoService     [singleton]  → TodoRepo
+//   TodoRepo        [transient]  (resolved)
+//   TodoController  [transient]  → TodoService
+//                   ⚠ missing: 'Mailer' is not in providers — resolve() will fail
+```
+
+Or from the CLI: `bunx hono-forge graph ./src/app.module.ts`.
+
 ### Pluggable logger — `LOGGER` / `registerLogger`
 
 Internal logs (`@Audit` today) go through the `LOGGER` DI token. Bind your own implementation once at startup — pino/winston-compatible (`level(data, msg?)`):
@@ -1681,6 +1716,8 @@ await writeFlowFiles('./flows', AppModule, { baseUrl: 'http://localhost:3000' })
 ```bash
 bunx hono-forge flows ./src/app.module.ts --out ./flows --base-url http://localhost:3000
 bunx hono-forge flows ./src/app.module.ts --single   # one file, a group per controller
+bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without a server
+bunx hono-forge routes ./src/app.module.ts           # route table for CI/debugging
 ```
 
 `--export <name>` picks a specific export when the entry file exports several modules. TypeScript entry files require Bun (or a pre-built JS entry under plain Node).

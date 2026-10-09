@@ -34,7 +34,7 @@ import type { ExceptionFilter, ExceptionFilterConstructor } from '../decorators/
 import { channels } from '../channels/registry';
 import { SseChannelClient, WsChannelClient } from '../channels/clients';
 import type { ChannelClient, WsLike } from '../channels/types';
-import type { ConcreteConstructor, ControllerConstructor, ControllerInstance } from './types';
+import type { ConcreteConstructor, ControllerConstructor, ControllerInstance, InjectionToken } from './types';
 
 /* ================= HELPERS ================= */
 
@@ -355,6 +355,15 @@ export class HonoRouteBuilder {
    */
   static moduleControllers(ModuleClass: Function): ControllerConstructor[] {
     return this.collectModule(ModuleClass, new Set()).controllers as ControllerConstructor[];
+  }
+
+  /**
+   * Collect the provider classes declared by a @Module (transitively across
+   * imports). Pure metadata read — nothing is resolved or instantiated.
+   * Pair with moduleControllers() for tooling like `container.describe()`.
+   */
+  static moduleProviders(ModuleClass: Function): InjectionToken[] {
+    return this.collectModule(ModuleClass, new Set()).providers as InjectionToken[];
   }
 
   private static collectModule(

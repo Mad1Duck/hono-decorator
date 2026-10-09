@@ -34,6 +34,22 @@ export class CircularDependencyError extends Error {
   }
 }
 
+/** One row of container.describe() — a provider's wiring snapshot. */
+export interface ProviderDescription {
+  /** Class name or token description. */
+  name: string;
+  /** Effective scope: singleton | request | stateless | transient (default). */
+  scope: 'singleton' | 'request' | 'stateless' | 'transient';
+  /** Dependency token names, in constructor order. */
+  dependencies: string[];
+  /** Dependency names not present in the described set or container registrations. */
+  missing: string[];
+  /** How the token is known: registered instance, factory, or plain class. */
+  registered: 'instance' | 'factory' | 'class';
+  /** A singleton instance already exists in the container. */
+  resolved: boolean;
+}
+
 /* ================= CONTAINER ================= */
 
 export class Container {
@@ -257,6 +273,74 @@ export class Container {
 
   getRegisteredTokens(): InjectionToken[] {
     return [...new Set([...this.singletons.keys(), ...this.factories.keys()])];
+  }
+
+  /**
+   * Static DI-graph snapshot for the given classes (controllers, providers) plus
+   * every token registered via registerInstance/registerFactory. Pure metadata
+   * read — nothing is resolved or instantiated.
+   *
+   * Use it to debug wiring: which scope each provider has, what it depends on,
+   * and which dependencies are NOT known to the container/module set.
+   */
+  describe(targets: Function[] = []): ProviderDescription[] {
+    const known = new Set<InjectionToken>([
+      ...targets as InjectionToken[],
+      ...this.getRegisteredTokens(),
+    ]);
+
+    const describeToken = (token: InjectionToken): ProviderDescription => {
+      const meta = typeof token === 'function' ? classMeta(token) : null;
+      const deps = typeof token === 'function' ? this.getInjectTokens(token as ConcreteConstructor) : [];
+      const scope: ProviderDescription['scope'] =
+        meta?.[METADATA_KEYS.REQUEST_SCOPED] ? 'request'
+        : meta?.[METADATA_KEYS.STATELESS] ? 'stateless'
+        : meta?.[METADATA_KEYS.SINGLETON] ? 'singleton'
+        : 'transient';
+      return {
+        name: this.getTokenName(token),
+        scope,
+        dependencies: deps.map(d => this.getTokenName(d)),
+        missing: deps.filter(d => !known.has(d)).map(d => this.getTokenName(d)),
+        registered: this.factories.has(token) ? 'factory'
+          : this.singletons.has(token) ? 'instance' : 'class',
+        resolved: this.singletons.has(token),
+      };
+    };
+
+    const described = new Set<InjectionToken>();
+    const out: ProviderDescription[] = [];
+    for (const token of [...targets as InjectionToken[], ...this.getRegisteredTokens()]) {
+      if (described.has(token)) continue;
+      described.add(token);
+      out.push(describeToken(token));
+    }
+    return out;
+  }
+
+  /**
+   * Print the DI graph produced by describe() — dependency arrows, scope badges,
+   * and a warning for dependencies that are not part of the described set
+   * (the classic "forgot to list it in the module's providers" bug).
+   */
+  printGraph(targets: Function[] = []): void {
+    const rows = this.describe(targets);
+    console.log(`\nDI graph — ${rows.length} provider(s)`);
+    const nameWidth = Math.max(4, ...rows.map(r => r.name.length));
+    const scopeWidth = 9;
+    for (const r of rows) {
+      const scope = `[${r.scope}]`.padEnd(scopeWidth + 2);
+      const deps = r.dependencies.length ? `→ ${r.dependencies.join(', ')}` : '';
+      const flags = [
+        r.registered === 'factory' ? 'factory' : r.registered === 'instance' ? 'instance' : '',
+        r.resolved ? 'resolved' : '',
+      ].filter(Boolean).join(', ');
+      console.log(`  ${r.name.padEnd(nameWidth)}  ${scope} ${deps}${flags ? `  (${flags})` : ''}`);
+      for (const m of r.missing) {
+        console.log(`  ${' '.repeat(nameWidth)}  ${' '.repeat(scopeWidth)} ⚠ missing: '${m}' is not in providers — resolve() will fail`);
+      }
+    }
+    console.log();
   }
 
   async runInScope<T>(fn: () => Promise<T>): Promise<T> {
