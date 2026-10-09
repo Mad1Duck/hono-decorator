@@ -127,7 +127,7 @@ class FeedController {
   controllers: [TodoController, FeedController],
   providers: [TodoService, TodoEvents, Janitor],
 })
-class AppModule {}
+export class AppModule {}
 
 // Auth: plug your token verification here (or use @JwtAuth for turnkey JWT)
 HonoRouteBuilder.configure({

@@ -1657,6 +1657,27 @@ await api.request('POST /users', { body: { name: 'Ada' } });
 
 Note: `output` is the handler's declared return type — handlers that return `Response` objects produce `Response` in the map (use plain-value returns for typed clients).
 
+## api-tester integration
+
+Two integration levels with [api-tester](https://github.com/Mad1Duck/api-tester) (or any OpenAPI-aware client):
+
+**1. OpenAPI import (zero config)** — point the importer at `/openapi.json`. The spec carries `x-transport: sse|websocket` and `x-channel` vendor extensions for `@Sse`/`@WebSocket`/`@ChannelRoute` routes, so tools that understand them generate real SSE/WS nodes instead of REST stubs.
+
+**2. Flow files** — `generateFlowFiles` / `writeFlowFiles` turn route metadata into ready-to-run api-tester flows (FlowFile v1). One file per controller, CRUD-ordered and chained: `POST` creates extract `id`, downstream `/:id` routes consume `{{id}}`; `@Validate` schemas become sample bodies, query params, and typed path params; guarded routes get `Authorization: Bearer {{token}}`; `@Status` drives status assertions; SSE/WS routes become listener nodes.
+
+```ts
+// scripts/export-flows.ts — bun scripts/export-flows.ts
+import { writeFlowFiles } from 'hono-forge';
+import { AppModule } from './src/app.module';
+
+await writeFlowFiles('./flows', AppModule, { baseUrl: 'http://localhost:3000' });
+// → flows/todos.flow.yaml, flows/users.flow.yaml — then "Import flow" in api-tester
+```
+
+`generateFlowFiles(target)` returns the file objects (accepts a `@Module`, a controller, or an array) if you'd rather inspect or post-process; `stringifyFlowFile(file)` serializes to YAML. Flow ids are deterministic — re-exporting the same controller keeps the id so re-imports update the existing flow instead of duplicating it.
+
+See a runnable example in `examples/todo-api/export-flows.ts`.
+
 ## Testing
 
 `createTestingModule` gives you an isolated DI container for unit and e2e tests — framework-agnostic (works with `bun:test`, vitest, `node:test`):

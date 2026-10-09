@@ -1,0 +1,28 @@
+version: 1
+id: bf23b8b2-64f7-4ee6-8f23-b8b264f76ee6
+name: Feed flow
+description: Generated from FeedController by hono-forge
+nodes:
+  - id: c72f60be-a28e-426f-872f-60bea28e626f
+    label: "GET /feed/ — feed"
+    position:
+      x: 0
+      y: 0
+    config:
+      type: sse
+      url: /feed/
+      pathParams: []
+      headers: []
+      listenDurationMs: 10000
+      extractors: []
+      assertions:
+        - path: "$status"
+          operator: equals
+          expected: "200"
+    enabled: true
+edges: []
+tags:
+  - generated
+  - hono-forge
+settings:
+  baseUrl: "http://localhost:3000"

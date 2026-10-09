@@ -51,7 +51,7 @@ function extractPathParamNames(path: string): string[] {
 }
 
 /** Convert a Zod schema to a plain JSON Schema object. */
-function zodToJsonSchema(schema: ZodType): Record<string, unknown> {
+export function zodToJsonSchema(schema: ZodType): Record<string, unknown> {
   const full = (z as any).toJSONSchema(schema) as Record<string, unknown>;
   const { $schema: _ignored, ...rest } = full;
   return rest;

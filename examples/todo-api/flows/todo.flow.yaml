@@ -1,0 +1,94 @@
+version: 1
+id: e8346238-9582-4dd2-8834-623895825dd2
+name: Todo flow
+description: Generated from TodoController by hono-forge
+nodes:
+  - id: "0a881357-0d43-4711-8a88-13570d436711"
+    label: "GET /todos — list"
+    position:
+      x: 0
+      y: 0
+    config:
+      type: rest
+      method: GET
+      url: /todos
+      headers: []
+      query:
+        - key: done
+          value: "true"
+          enabled: false
+        - key: limit
+          value: "20"
+          enabled: false
+      extractors: []
+      assertions:
+        - path: "$status"
+          operator: equals
+          expected: "200"
+    enabled: true
+  - id: "36d6071a-a4e3-4a21-86d6-071aa4e3ba21"
+    label: "POST /todos — create"
+    position:
+      x: 0
+      y: 110
+    config:
+      type: rest
+      method: POST
+      url: /todos
+      headers:
+        - key: Authorization
+          value: "Bearer {{token}}"
+          enabled: true
+        - key: Content-Type
+          value: application/json
+          enabled: true
+      query: []
+      extractors:
+        - variableName: id
+          path: "$.id"
+      assertions:
+        - path: "$status"
+          operator: equals
+          expected: "201"
+        - path: "$.id"
+          operator: exists
+      bodyMode: raw
+      body: "{\n  \"title\": \"Example\",\n  \"done\": false\n}"
+    enabled: true
+  - id: "76d9c90a-7bbf-4f7e-86d9-c90a7bbfff7e"
+    label: "GET /todos/:id — getOne"
+    position:
+      x: 0
+      y: 220
+    config:
+      type: rest
+      method: GET
+      url: "/todos/{{id}}"
+      headers: []
+      query: []
+      pathParams:
+        - key: id
+          value: "{{id}}"
+          enabled: true
+      extractors: []
+      assertions:
+        - path: "$status"
+          operator: equals
+          expected: "200"
+    enabled: true
+edges:
+  - id: "1b2faa71-c135-463f-8b2f-aa71c135763f"
+    source: "0a881357-0d43-4711-8a88-13570d436711"
+    target: "36d6071a-a4e3-4a21-86d6-071aa4e3ba21"
+  - id: b7c17aa3-296a-4285-87c1-7aa3296a9285
+    source: "36d6071a-a4e3-4a21-86d6-071aa4e3ba21"
+    target: "76d9c90a-7bbf-4f7e-86d9-c90a7bbfff7e"
+tags:
+  - generated
+  - hono-forge
+settings:
+  baseUrl: "http://localhost:3000"
+  defaultVariables:
+    - key: token
+      value: ""
+      enabled: false
