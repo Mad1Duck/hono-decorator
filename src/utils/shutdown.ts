@@ -1,4 +1,5 @@
 import { container } from '../core/container';
+import { channels } from '../channels/registry';
 
 export interface GracefulShutdownOptions {
   /** Signals that trigger shutdown. Defaults to SIGINT + SIGTERM. */
@@ -7,6 +8,12 @@ export interface GracefulShutdownOptions {
   timeoutMs?: number;
   /** App-level cleanup (close server, drain connections, ...) runs first. */
   onShutdown?: () => void | Promise<void>;
+  /**
+   * Drain channel subscribers before shutdown — closes every SSE stream and
+   * WebSocket connection registered via @ChannelRoute/channels, then closes
+   * the adapter (e.g. Redis pub/sub connections). Default true.
+   */
+  drainChannels?: boolean;
 }
 
 /**
@@ -30,6 +37,7 @@ export function gracefulShutdown(options: GracefulShutdownOptions = {}): () => v
     timer.unref?.();
     try {
       await options.onShutdown?.();
+      if (options.drainChannels !== false) await channels.close();
       await container.shutdown();
       clearTimeout(timer);
       process.exit(0);

@@ -1,6 +1,7 @@
 import { METADATA_KEYS } from './metadata';
 import type { CacheMetadata, HeadersMetadata, IdempotentMetadata, RedirectMetadata, ResponseStatusMetadata } from './metadata';
 import { HttpException } from '../core/http-exception';
+import { getMetricsRegistry } from '../utils/metrics';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyFn = (...args: any[]) => any;
@@ -133,6 +134,81 @@ export function NoContent(): (value: Function, context: ClassMethodDecoratorCont
   };
 }
 
+/* ================= CACHE CONTROL / ETAG ================= */
+
+export interface CacheControlOptions {
+  /** max-age=N seconds. */
+  maxAge?: number;
+  /** s-maxage=N seconds (shared caches). */
+  sharedMaxAge?: number;
+  public?: boolean;
+  private?: boolean;
+  noCache?: boolean;
+  noStore?: boolean;
+  mustRevalidate?: boolean;
+  staleWhileRevalidate?: number;
+  immutable?: boolean;
+}
+
+function cacheControlValue(o: CacheControlOptions): string {
+  const parts: string[] = [];
+  if (o.noStore) parts.push('no-store');
+  if (o.noCache) parts.push('no-cache');
+  if (o.public) parts.push('public');
+  if (o.private) parts.push('private');
+  if (o.maxAge !== undefined) parts.push(`max-age=${o.maxAge}`);
+  if (o.sharedMaxAge !== undefined) parts.push(`s-maxage=${o.sharedMaxAge}`);
+  if (o.mustRevalidate) parts.push('must-revalidate');
+  if (o.staleWhileRevalidate !== undefined) parts.push(`stale-while-revalidate=${o.staleWhileRevalidate}`);
+  if (o.immutable) parts.push('immutable');
+  return parts.join(', ');
+}
+
+/**
+ * Set the `Cache-Control` response header. Pass a raw directive string or a
+ * typed options object:
+ *
+ * @example
+ * @Get('/feed')
+ * @CacheControl({ public: true, maxAge: 60, staleWhileRevalidate: 30 })
+ * feed(c: Context) { ... }
+ *
+ * @Get('/private')
+ * @CacheControl('private, no-store')
+ * mine(c: Context) { ... }
+ */
+export function CacheControl(
+  options: string | CacheControlOptions
+): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.CACHE_CONTROL] as Record<string, string> | undefined) ?? {};
+    all[String(context.name)] = typeof options === 'string' ? options : cacheControlValue(options);
+    context.metadata[METADATA_KEYS.CACHE_CONTROL] = all;
+  };
+}
+
+/**
+ * Emit an `ETag` computed from the serialized response body, and honor
+ * conditional requests: when `If-None-Match` matches, the response short-
+ * circuits to `304 Not Modified` with an empty body.
+ *
+ * The tag is a weak ETag (`W/"<sha-256-prefix>"`) by default — pass
+ * `{ weak: false }` for a strong tag. Applies only to JSON-serializable
+ * handler results; a `Response` returned directly bypasses ETag handling.
+ *
+ * @example
+ * @Get('/article/:id')
+ * @ETag()
+ * article(c: Context) { return this.repo.find(...); }
+ */
+export function ETag(options?: { weak?: boolean }): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.ETAG] as Record<string, { weak: boolean }> | undefined) ?? {};
+    all[String(context.name)] = { weak: options?.weak !== false };
+    context.metadata[METADATA_KEYS.ETAG] = all;
+  };
+}
+
 /* ================= TRACK METRICS ================= */
 
 export function TrackMetrics(options?: { name?: string; }) {
@@ -148,9 +224,11 @@ export function TrackMetrics(options?: { name?: string; }) {
       try {
         const result = await (originalFn as AnyFn).apply(this, args);
         this.metrics?.trackMethodDuration?.(metricName, Date.now() - start, 'success');
+        getMetricsRegistry().observe('hono_forge_method_duration_seconds', (Date.now() - start) / 1000, { method: metricName, status: 'success' });
         return result;
       } catch (error) {
         this.metrics?.trackMethodDuration?.(metricName, Date.now() - start, 'error');
+        getMetricsRegistry().observe('hono_forge_method_duration_seconds', (Date.now() - start) / 1000, { method: metricName, status: 'error' });
         throw error;
       }
     }) as unknown as T;

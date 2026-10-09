@@ -1,7 +1,7 @@
 import type { ZodTypeAny } from 'zod';
 import { txStorage } from '../utils/transaction';
 import { HttpException } from '../core/http-exception';
-import { getRequestContext, createRequestContext, runInRequestContext, type CacheEntry } from '../core/request-context';
+import { getRequestContext, getContext, createRequestContext, runInRequestContext, type CacheEntry } from '../core/request-context';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyFn = (...args: any[]) => any;
@@ -24,6 +24,7 @@ export function Throttle(ms: number) {
       const lastCall = lastCallMap.get(this) ?? 0;
       if (now - lastCall < ms) {
         const retryAfterMs = ms - (now - lastCall);
+        getContext()?.header('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
         throw HttpException.tooManyRequests(`Throttled: wait ${retryAfterMs}ms`, { meta: { retryAfterMs } });
       }
       lastCallMap.set(this, now);

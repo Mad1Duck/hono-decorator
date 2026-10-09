@@ -6,6 +6,8 @@
 export interface SseStreamLike {
   writeSSE(data: { event?: string; data: string }): Promise<void>;
   closed: boolean;
+  /** Optional — present on hono/streaming SSE streams; used for graceful drain. */
+  close?(): void;
 }
 
 /**
@@ -14,6 +16,8 @@ export interface SseStreamLike {
 export interface WsLike {
   send(data: string): void;
   readyState: number;
+  /** Optional — standard WS close(code?, reason?); used for graceful drain. */
+  close?(code?: number, reason?: string): void;
 }
 
 /* ================= CHANNEL CLIENT ================= */
@@ -23,6 +27,8 @@ export interface ChannelClient {
   id: string;
   send(event: string, data: unknown): Promise<void>;
   isAlive(): boolean;
+  /** Optional — close the underlying stream/socket during graceful shutdown. */
+  close?(): void | Promise<void>;
 }
 
 /* ================= ADAPTER INTERFACE ================= */

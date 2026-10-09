@@ -44,6 +44,13 @@ function classMeta(target: Function): ClassMeta | null {
   return (target as unknown as { [Symbol.metadata]?: ClassMeta })[Symbol.metadata] ?? null;
 }
 
+/** SHA-256 of the body, truncated — sufficient for conditional requests. */
+async function computeEtag(body: string, weak: boolean): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
+  const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 27);
+  return `${weak ? 'W/' : ''}"${hex}"`;
+}
+
 /* ================= TYPES ================= */
 
 export type ErrorHandler = (
@@ -624,6 +631,7 @@ export class HonoRouteBuilder {
 
     /* ----- WebSocket Route ----- */
     const allWs = (meta?.[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
+    const wsMsgMap = (meta?.[METADATA_KEYS.WS_MESSAGE] as Record<string, string> | undefined) ?? {};
     if (allWs[handlerName]) {
       if (!this.config.webSocketUpgrader) {
         throw new Error(
@@ -646,12 +654,37 @@ export class HonoRouteBuilder {
         const fn = inst[handlerName];
         if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
         const result = (await fn.call(inst, c)) as Record<string, unknown> | undefined;
+        const events = result ?? {};
+
+        // @OnWsMessage: route JSON envelope frames {"event","data"} to sibling
+        // methods before falling through to the user's onMessage callback.
+        const msgHandlers = Object.entries(wsMsgMap);
+        if (msgHandlers.length) {
+          const userOnMessage = events['onMessage'] as ((e: unknown, ws: unknown) => unknown) | undefined;
+          events['onMessage'] = async (evt: unknown, ws: unknown) => {
+            const raw = (evt as { data?: unknown })?.data;
+            let dispatched = false;
+            if (typeof raw === 'string') {
+              try {
+                const parsed = JSON.parse(raw) as { event?: unknown; data?: unknown };
+                if (parsed && typeof parsed === 'object' && typeof parsed.event === 'string') {
+                  for (const [method, event] of msgHandlers) {
+                    if (parsed.event !== event) continue;
+                    dispatched = true;
+                    const handler = inst[method];
+                    if (typeof handler === 'function') await handler.call(inst, parsed.data, ws, evt);
+                  }
+                }
+              } catch { /* non-JSON frame → fall through */ }
+            }
+            if (!dispatched) await userOnMessage?.(evt, ws);
+          };
+        }
 
         // @ChannelRoute: wrap the returned WS event callbacks so connect/disconnect
         // automatically subscribe/unsubscribe a channel client.
         if (channelPattern) {
           const channel = resolveChannel(c)!;
-          const events = result ?? {};
           let channelClient: ChannelClient | undefined;
           const userOnOpen = events['onOpen'] as ((e: unknown, ws: unknown) => unknown) | undefined;
           const userOnClose = events['onClose'] as ((e: unknown, ws: unknown) => unknown) | undefined;
@@ -671,7 +704,7 @@ export class HonoRouteBuilder {
           await requestLogger({ method: 'GET', path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 101, durationMs: Date.now() - startMs, traceId });
         }
 
-        return result;
+        return msgHandlers.length ? events : result;
       });
 
       register(fullPathNoSlash)('GET', ...middlewares, wsHandler);
@@ -686,6 +719,10 @@ export class HonoRouteBuilder {
     const singleFlight = allSingleFlight[handlerName] ?? false;
     const allHeaders = (meta?.[METADATA_KEYS.HEADERS] as Record<string, HeadersMetadata> | undefined) ?? {};
     const headerMeta = allHeaders[handlerName];
+    const allCacheControl = (meta?.[METADATA_KEYS.CACHE_CONTROL] as Record<string, string> | undefined) ?? {};
+    const cacheControlMeta = allCacheControl[handlerName];
+    const allEtag = (meta?.[METADATA_KEYS.ETAG] as Record<string, { weak: boolean }> | undefined) ?? {};
+    const etagMeta = allEtag[handlerName];
     const allRedirect = (meta?.[METADATA_KEYS.REDIRECT] as Record<string, RedirectMetadata> | undefined) ?? {};
     const redirectMeta = allRedirect[handlerName];
     const allStatus = (meta?.[METADATA_KEYS.RESPONSE_STATUS] as Record<string, ResponseStatusMetadata> | undefined) ?? {};
@@ -706,6 +743,8 @@ export class HonoRouteBuilder {
       if (headerMeta) {
         for (const [name, value] of Object.entries(headerMeta)) c.header(name, value);
       }
+
+      if (cacheControlMeta) c.header('Cache-Control', cacheControlMeta);
 
       // RFC 9745: @ApiDeprecated emits Deprecation (+ optional Sunset) headers.
       if (deprecatedMeta) {
@@ -767,6 +806,14 @@ export class HonoRouteBuilder {
               await cacheAdapter.set(cacheKey, result, cacheMeta.ttl);
             }
             if (result !== undefined) {
+              if (etagMeta) {
+                const etag = await computeEtag(JSON.stringify(result), etagMeta.weak);
+                c.header('ETag', etag);
+                const inm = c.req.header('If-None-Match');
+                if (inm && inm.split(',').map((t) => t.trim()).includes(etag)) {
+                  return c.body(null, 304);
+                }
+              }
               return statusMeta ? c.json(result, statusMeta.status as ContentfulStatusCode) : c.json(result);
             }
             return c.body(null, statusMeta?.status as StatusCode | undefined);

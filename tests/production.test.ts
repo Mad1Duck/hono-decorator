@@ -1,0 +1,379 @@
+import { describe, it, expect } from 'bun:test';
+import { Hono } from 'hono';
+import type { Context } from 'hono';
+import {
+  CacheControl,
+  ChannelRegistry,
+  Controller,
+  Cron,
+  ETag,
+  Get,
+  HonoRouteBuilder,
+  InMemoryChannelAdapter,
+  Injectable,
+  mountHealth,
+  mountMetrics,
+  getMetricsRegistry,
+  OnWsMessage,
+  Public,
+  RateLimit,
+  Singleton,
+  Throttle,
+  WebSocket,
+  redisRateLimiter,
+  parseCron,
+  nextCronTime,
+  startScheduler,
+} from '../src';
+import type { ChannelClient, RedisRateLimitClient } from '../src';
+import type { WsLike } from '../src';
+
+const makeRequest = (path: string, init?: RequestInit): Request =>
+  new Request(`http://test.local${path}`, init);
+
+/* ================= RETRY-AFTER ================= */
+
+describe('Retry-After on 429', () => {
+  it('@RateLimit emits Retry-After header (seconds)', async () => {
+    @Controller('/rl')
+    @Injectable()
+    class RlController {
+      @Get() @Public() @RateLimit({ max: 1, windowMs: 60_000 })
+      hit() { return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(RlController);
+    const first = await app.fetch(makeRequest('/rl'));
+    expect(first.status).toBe(200);
+    const second = await app.fetch(makeRequest('/rl'));
+    expect(second.status).toBe(429);
+    const retryAfter = second.headers.get('Retry-After');
+    expect(retryAfter).not.toBeNull();
+    expect(Number(retryAfter)).toBeGreaterThan(0);
+    expect(Number(retryAfter)).toBeLessThanOrEqual(60);
+  });
+
+  it('redisRateLimiter emits Retry-After from PTTL', async () => {
+    const store = new Map<string, { count: number; expiresAt: number }>();
+    const fakeRedis: RedisRateLimitClient = {
+      incr: async (k) => {
+        const e = store.get(k) ?? { count: 0, expiresAt: 0 };
+        e.count += 1;
+        store.set(k, e);
+        return e.count;
+      },
+      pexpire: async (k, ms) => { store.get(k)!.expiresAt = Date.now() + ms; },
+      pttl: async (k) => Math.max(0, (store.get(k)?.expiresAt ?? 0) - Date.now()),
+    };
+    HonoRouteBuilder.configure({ rateLimiterFactory: redisRateLimiter(fakeRedis) });
+    try {
+      @Controller('/rlr')
+      @Injectable()
+      class RlRedisController {
+        @Get() @Public() @RateLimit({ max: 1, windowMs: 30_000 })
+        hit() { return { ok: true }; }
+      }
+      const app = HonoRouteBuilder.build(RlRedisController);
+      await app.fetch(makeRequest('/rlr'));
+      const second = await app.fetch(makeRequest('/rlr'));
+      expect(second.status).toBe(429);
+      expect(Number(second.headers.get('Retry-After'))).toBeGreaterThan(0);
+      expect(Number(second.headers.get('Retry-After'))).toBeLessThanOrEqual(30);
+    } finally {
+      HonoRouteBuilder.configure({ rateLimiterFactory: undefined });
+    }
+  });
+
+  it('@Throttle on a singleton controller emits Retry-After', async () => {
+    @Controller('/thr')
+    @Injectable()
+    @Singleton()
+    class ThrottledController {
+      @Get() @Public() @Throttle(60_000)
+      hit() { return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(ThrottledController);
+    await app.fetch(makeRequest('/thr'));
+    const second = await app.fetch(makeRequest('/thr'));
+    expect(second.status).toBe(429);
+    expect(Number(second.headers.get('Retry-After'))).toBeGreaterThan(0);
+  });
+});
+
+/* ================= LIVENESS / READINESS ================= */
+
+describe('mountHealth probes', () => {
+  it('probes: /live is 200 without checks, /ready reflects dependencies', async () => {
+    const app = new Hono();
+    let dbUp = true;
+    mountHealth(app, {
+      probes: true,
+      checks: { db: () => dbUp },
+    });
+
+    expect((await app.fetch(makeRequest('/health/live'))).status).toBe(200);
+    expect((await app.fetch(makeRequest('/health/ready'))).status).toBe(200);
+
+    dbUp = false;
+    // Liveness stays 200 — a dead dependency must not trigger pod restart.
+    expect((await app.fetch(makeRequest('/health/live'))).status).toBe(200);
+    expect((await app.fetch(makeRequest('/health/ready'))).status).toBe(503);
+    // Backward-compat base endpoint also reflects the failure.
+    expect((await app.fetch(makeRequest('/health'))).status).toBe(503);
+  });
+
+  it('liveChecks gate /live independently', async () => {
+    const app = new Hono();
+    mountHealth(app, {
+      probes: true,
+      checks: { db: () => true },
+      liveChecks: { deadlockDetector: () => false },
+    });
+    expect((await app.fetch(makeRequest('/health/live'))).status).toBe(503);
+    expect((await app.fetch(makeRequest('/health/ready'))).status).toBe(200);
+  });
+});
+
+/* ================= GRACEFUL DRAIN ================= */
+
+describe('channel drain', () => {
+  it('close() closes every client transport then clears the map', async () => {
+    const registry = new ChannelRegistry();
+    const adapter = new InMemoryChannelAdapter();
+    registry.use(adapter);
+
+    const closed: string[] = [];
+    const fakeWs = (id: string): ChannelClient => ({
+      id,
+      send: async () => {},
+      isAlive: () => true,
+      close: () => { closed.push(id); },
+    });
+    await registry.subscribe('room:a', fakeWs('c1'));
+    await registry.subscribe('room:a', fakeWs('c2'));
+    await registry.subscribe('room:b', fakeWs('c3'));
+
+    await registry.close();
+    expect(closed.sort()).toEqual(['c1', 'c2', 'c3']);
+    expect(adapter.subscriberCount('room:a')).toBe(0);
+    expect(adapter.subscriberCount('room:b')).toBe(0);
+  });
+});
+
+/* ================= CRON ================= */
+
+describe('cron parser', () => {
+  it('parses wildcards, steps, ranges, and lists', () => {
+    const c = parseCron('*/15 9-17 1,15 * 1-5');
+    expect(c.minutes.has(0)).toBe(true);
+    expect(c.minutes.has(30)).toBe(true);
+    expect(c.minutes.has(7)).toBe(false);
+    expect(c.hours.has(9)).toBe(true);
+    expect(c.hours.has(18)).toBe(false);
+    expect(c.dom.has(1)).toBe(true);
+    expect(c.dom.has(15)).toBe(true);
+    expect(c.dom.has(2)).toBe(false);
+    expect(c.dow.has(1)).toBe(true);
+    expect(c.dow.has(6)).toBe(false);
+  });
+
+  it('throws on malformed expressions', () => {
+    expect(() => parseCron('0 2 *')).toThrow();
+    expect(() => parseCron('99 * * * *')).toThrow();
+    expect(() => parseCron('*/0 * * * *')).toThrow();
+  });
+
+  it('nextCronTime: daily 02:00 rolls to next day', () => {
+    const from = new Date(2026, 0, 10, 3, 0); // Jan 10 03:00 local
+    const next = nextCronTime('0 2 * * *', from);
+    expect(next.getHours()).toBe(2);
+    expect(next.getMinutes()).toBe(0);
+    expect(next.getDate()).toBe(11);
+  });
+
+  it('nextCronTime: weekday-only skips weekends', () => {
+    // Jan 10 2026 is a Saturday.
+    const from = new Date(2026, 0, 10, 10, 0);
+    const next = nextCronTime('0 9 * * 1-5', from);
+    expect(next.getDay()).toBe(1); // Monday
+    expect(next.getHours()).toBe(9);
+  });
+
+  it('nextCronTime: OR semantics when dom and dow both restricted', () => {
+    // From Jan 14: Jan 15 is a Thursday — dom=15 matches even though dow=1 doesn't.
+    // (From Jan 10, Monday Jan 12 would fire first via dow — either match fires.)
+    const from = new Date(2026, 0, 14, 0, 0);
+    const next = nextCronTime('0 0 15 * 1', from);
+    expect(next.getDate()).toBe(15);
+    expect(next.getDay()).toBe(4);
+  });
+});
+
+describe('@Cron scheduling', () => {
+  it('registers and tears down without throwing', async () => {
+    let ran = 0;
+    @Injectable()
+    class Jobs {
+      @Cron('0 2 * * *')
+      nightly() { ran++; }
+    }
+    const teardown = startScheduler(Jobs);
+    teardown();
+    expect(ran).toBe(0); // next fire is minutes away — just verifying no crash
+  });
+
+  it('invalid expression logs and skips instead of crashing', () => {
+    @Injectable()
+    class BadJobs {
+      @Cron('not a cron')
+      broken() {}
+    }
+    const teardown = startScheduler(BadJobs); // must not throw
+    teardown();
+  });
+});
+
+/* ================= METRICS ================= */
+
+describe('mountMetrics', () => {
+  it('collects request counters + histogram and exposes Prometheus text', async () => {
+    getMetricsRegistry().reset();
+    const app = new Hono();
+    mountMetrics(app);
+    app.get('/t', (c) => c.json({ ok: true }));
+    app.get('/boom', (c) => c.json({ err: 1 }, 500));
+
+    await app.fetch(makeRequest('/t'));
+    await app.fetch(makeRequest('/t'));
+    await app.fetch(makeRequest('/boom'));
+
+    const res = await app.fetch(makeRequest('/metrics'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toContain('text/plain');
+    const body = await res.text();
+
+    expect(body).toContain('# TYPE http_requests_total counter');
+    expect(body).toMatch(/http_requests_total\{method="GET",route="\/t",status="200"\} 2/);
+    expect(body).toMatch(/http_requests_total\{.*status="500"\} 1/);
+    expect(body).toContain('http_request_duration_seconds_bucket');
+    expect(body).toContain('le="+Inf"');
+    expect(body).toContain('http_request_duration_seconds_sum');
+  });
+
+  it('does not count /metrics itself and honors exclude', async () => {
+    getMetricsRegistry().reset();
+    const app = new Hono();
+    mountMetrics(app, { exclude: ['/internal'] });
+    app.get('/internal', (c) => c.text('x'));
+    await app.fetch(makeRequest('/internal'));
+    const body = await (await app.fetch(makeRequest('/metrics'))).text();
+    expect(body).not.toContain('/internal');
+    expect(body).not.toContain('/metrics');
+  });
+});
+
+/* ================= ON WS MESSAGE ================= */
+
+describe('@OnWsMessage', () => {
+  it('routes JSON envelope frames to the matching sibling method', async () => {
+    let captured: Record<string, (e: unknown, ws: unknown) => unknown> | undefined;
+    HonoRouteBuilder.configure({
+      webSocketUpgrader: (factory) => async (c: Context) => {
+        captured = (await factory(c)) as Record<string, (e: unknown, ws: unknown) => unknown>;
+        return c.text('upgraded');
+      },
+    });
+    try {
+      const received: Array<{ method: string; data: unknown }> = [];
+      const fallback: unknown[] = [];
+
+      @Controller('/wsm')
+      @Injectable()
+      @Singleton()
+      class WsController {
+        readonly log = received;
+        readonly fb = fallback;
+
+        @WebSocket('/sock') @Public()
+        sock() {
+          return { onMessage: (e: unknown) => { this.fb.push((e as { data: unknown }).data); } };
+        }
+
+        @OnWsMessage('join')
+        onJoin(data: unknown) { this.log.push({ method: 'join', data }); }
+
+        @OnWsMessage('ping')
+        onPing(data: unknown) { this.log.push({ method: 'ping', data }); }
+      }
+
+      const app = HonoRouteBuilder.build(WsController);
+      await app.fetch(makeRequest('/wsm/sock'));
+      expect(captured?.['onMessage']).toBeDefined();
+
+      const ws = { send: () => {}, readyState: 1 };
+      await captured!['onMessage']!({ data: JSON.stringify({ event: 'join', data: { room: 'x' } }) }, ws);
+      await captured!['onMessage']!({ data: JSON.stringify({ event: 'ping', data: null }) }, ws);
+      await captured!['onMessage']!({ data: JSON.stringify({ event: 'unknown' }) }, ws);
+      await captured!['onMessage']!({ data: 'plain text frame' }, ws);
+
+      expect(received).toEqual([
+        { method: 'join', data: { room: 'x' } },
+        { method: 'ping', data: null },
+      ]);
+      expect(fallback).toEqual([JSON.stringify({ event: 'unknown' }), 'plain text frame']);
+    } finally {
+      HonoRouteBuilder.configure({ webSocketUpgrader: undefined });
+    }
+  });
+});
+
+/* ================= CACHE CONTROL / ETAG ================= */
+
+describe('@CacheControl / @ETag', () => {
+  @Controller('/cached')
+  @Injectable()
+  class CachedController {
+    @Get('/opts') @Public()
+    @CacheControl({ public: true, maxAge: 60, staleWhileRevalidate: 30 })
+    opts() { return { v: 1 }; }
+
+    @Get('/raw') @Public()
+    @CacheControl('private, no-store')
+    raw() { return { v: 2 }; }
+
+    @Get('/tagged') @Public() @ETag()
+    tagged() { return { stable: 'body' }; }
+
+    @Get('/strong') @Public() @ETag({ weak: false })
+    strong() { return { stable: 'body' }; }
+  }
+  const app = HonoRouteBuilder.build(CachedController);
+
+  it('CacheControl sets header from options object', async () => {
+    const res = await app.fetch(makeRequest('/cached/opts'));
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=60, stale-while-revalidate=30');
+  });
+
+  it('CacheControl passes through raw strings', async () => {
+    const res = await app.fetch(makeRequest('/cached/raw'));
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+  });
+
+  it('ETag emits a weak tag and honors If-None-Match with 304', async () => {
+    const first = await app.fetch(makeRequest('/cached/tagged'));
+    const etag = first.headers.get('ETag');
+    expect(etag).toMatch(/^W\/"[0-9a-f]+"$/);
+
+    const second = await app.fetch(makeRequest('/cached/tagged', { headers: { 'If-None-Match': etag! } }));
+    expect(second.status).toBe(304);
+    expect(await second.text()).toBe('');
+
+    const third = await app.fetch(makeRequest('/cached/tagged', { headers: { 'If-None-Match': '"stale"' } }));
+    expect(third.status).toBe(200);
+    expect((await third.json()) as { stable: string }).toEqual({ stable: 'body' });
+  });
+
+  it('ETag({ weak: false }) emits a strong tag', async () => {
+    const res = await app.fetch(makeRequest('/cached/strong'));
+    expect(res.headers.get('ETag')).toMatch(/^"[0-9a-f]+"$/);
+  });
+});

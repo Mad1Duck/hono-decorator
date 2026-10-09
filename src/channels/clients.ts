@@ -16,6 +16,10 @@ export class SseChannelClient implements ChannelClient {
     const s = this.stream as SseStreamLike & { aborted?: boolean; };
     return !s.closed && !s.aborted;
   }
+
+  close(): void {
+    this.stream.close?.();
+  }
 }
 
 /* ================= WEBSOCKET CLIENT ================= */
@@ -32,5 +36,9 @@ export class WsChannelClient implements ChannelClient {
 
   isAlive(): boolean {
     return this.ws.readyState === 1; // 1 = OPEN
+  }
+
+  close(): void {
+    this.ws.close?.(1001, 'server shutting down'); // 1001 = going away
   }
 }

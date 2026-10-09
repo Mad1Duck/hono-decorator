@@ -40,6 +40,9 @@ export const METADATA_KEYS = {
   CUSTOM: Symbol.for('hono-forge.custom'),
   SSE_ROUTE: Symbol.for('hono-forge.sseRoute'),
   WEBSOCKET_ROUTE: Symbol.for('hono-forge.websocketRoute'),
+  WS_MESSAGE: Symbol.for('hono-forge.wsMessage'),
+  CACHE_CONTROL: Symbol.for('hono-forge.cacheControl'),
+  ETAG: Symbol.for('hono-forge.etag'),
   CHANNEL_ROUTE: Symbol.for('hono-forge.channelRoute'),
   IS_PUBLIC: Symbol.for('hono-forge.isPublic'),
   IS_PRIVATE: Symbol.for('hono-forge.isPrivate'),
@@ -175,7 +178,10 @@ export interface ResponseStatusMetadata {
 
 /** @Interval metadata — scheduled service method. */
 export interface ScheduleMetadata {
-  everyMs: number;
+  /** @Interval — fixed delay between runs. Mutually exclusive with cron. */
+  everyMs?: number;
+  /** @Cron — standard 5-field cron expression. */
+  cron?: string;
   /** Run once immediately at scheduler start. */
   immediate?: boolean;
 }

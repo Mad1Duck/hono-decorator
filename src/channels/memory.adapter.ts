@@ -53,6 +53,11 @@ export class InMemoryChannelAdapter implements ChannelAdapter {
   }
 
   async close(): Promise<void> {
+    for (const clients of this.channels.values()) {
+      for (const client of clients) {
+        try { await client.close?.(); } catch { /* draining is best-effort */ }
+      }
+    }
     this.channels.clear();
   }
 

@@ -11,7 +11,7 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Dependency injection** — `@Injectable([deps])`, `@Singleton`, `@RequestScoped`, circular dependency detection, lifecycle hooks
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
 - **`@Validate`** — one Zod schema drives both request validation and the OpenAPI spec
-- **Rate limiting** — `@RateLimit` works out of the box (in-memory), pluggable to Redis via factory
+- **Rate limiting** — `@RateLimit` works out of the box (in-memory), pluggable to Redis via factory; `429` responses carry `Retry-After`
 - **Idempotency** — `@Idempotent` replays responses per `Idempotency-Key`; `@SingleFlight` dedupes concurrent identical requests
 - **Middleware** — `@Middleware` / `@Use` at class or method level; built-in `@Cors`, `@Compress`, `@SecureHeaders`, `@PrettyJson`
 - **Auto-discovery** — `discoverControllers` (Bun) and `fromModules` (any bundler)
@@ -24,7 +24,8 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Operational helpers** — `mountHealth` health checks, `gracefulShutdown`, `printRoutes` route table, `LOGGER` DI token
 - **Typed config** — `registerConfig` Zod-validates env once at boot, injectable via `CONFIG` token
 - **Event bus** — `@OnEvent` + `events.emit` in-process pub/sub with full DI
-- **Scheduling** — `@Interval` service jobs with overlap guard and clean shutdown
+- **Scheduling** — `@Interval` + `@Cron` service jobs (5-field cron parser, zero deps) with overlap guard and clean shutdown
+- **Metrics** — `mountMetrics` Prometheus endpoint + `@TrackMetrics`, one shared registry
 - **Resilience** — `@CircuitBreaker` fail-fast for upstream calls
 - **API versioning** — `@Controller(path, { version: 'v2' })` per-controller prefix
 
@@ -178,9 +179,10 @@ One call wires everything a typical app needs — no manual plumbing for health 
 import { createApp } from 'hono-forge';
 
 const app = createApp(AppModule, {
-  health: { checks: { db: () => db.ping(), redis: () => redis.ping() } }, // GET /health
-  openapi: { info: { title: 'My API', version: '1.0.0' } },              // GET /docs + /openapi.json
-  printRoutes: true,                                                     // route table at startup
+  health: { probes: true, checks: { db: () => db.ping() } }, // /health + /health/live + /health/ready
+  metrics: true,                                            // GET /metrics (Prometheus)
+  openapi: { info: { title: 'My API', version: '1.0.0' } }, // GET /docs + /openapi.json
+  printRoutes: true,                                        // route table at startup
   shutdown: { timeoutMs: 10_000, onShutdown: async () => stopWorkers() },
 });
 
@@ -862,7 +864,7 @@ internalApp.route('/', HonoRouteBuilder.build(AdminController));
 
 ## Rate limiting
 
-`@RateLimit` works out of the box — a per-route in-memory fixed-window limiter is used when no factory is configured, keyed by client IP (or `keyGenerator` when provided). Exceeding `max` returns `429 Too Many Requests` with `retryAfterMs` in `meta`. Every response carries standard `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers so clients can back off gracefully.
+`@RateLimit` works out of the box — a per-route in-memory fixed-window limiter is used when no factory is configured, keyed by client IP (or `keyGenerator` when provided). Exceeding `max` returns `429 Too Many Requests` with `retryAfterMs` in `meta` **and a standard `Retry-After` header** (seconds). Every response carries standard `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers so clients can back off gracefully. `Retry-After` is emitted by all three limiter paths — `@RateLimit` (memory or Redis) and `@Throttle`.
 
 ```ts
 @Post('/login')
@@ -1056,6 +1058,32 @@ class ChatController {
   }
 }
 ```
+
+### Per-message routing — `@OnWsMessage('event')`
+
+Multiplex multiple message types through one connection using JSON envelopes.
+Incoming text frames shaped `{ "event": "<name>", "data": <payload> }` are
+dispatched to the matching sibling method as `(data, ws, rawEvent)`:
+
+```ts
+@Controller('/ws')
+class ChatController {
+  @WebSocket('/room') @Public()
+  room() {
+    // fallback for non-envelope frames and unmatched events
+    return { onMessage: (e, ws) => ws.send('unhandled frame') };
+  }
+
+  @OnWsMessage('join')
+  onJoin(data: { user: string }, ws) { /* ... */ }
+
+  @OnWsMessage('message')
+  onChat(data: { text: string }, ws) { ws.send(`Echo: ${data.text}`); }
+}
+```
+
+Non-JSON frames, frames without an `event` field, and unmatched events fall
+through to the route's own `onMessage`. Composes with `@ChannelRoute`.
 
 ---
 
@@ -1404,6 +1432,29 @@ oldUsers() { /* never invoked — route always redirects */ }
 
 `@Header` is repeatable (multiple decorators merge) and applies to responses produced via `c.json`/`c.body`/etc. — a raw `new Response()` bypasses it. `@Redirect` skips the handler entirely (guards/middleware still run).
 
+### `@CacheControl` / `@ETag` — conditional requests
+
+```ts
+@Get('/feed')
+@CacheControl({ public: true, maxAge: 60, staleWhileRevalidate: 30 })
+feed() { /* ... */ }
+// → Cache-Control: public, max-age=60, stale-while-revalidate=30
+
+@Get('/raw')
+@CacheControl('private, no-store') // raw directive strings work too
+raw() { /* ... */ }
+
+@Get('/article/:id')
+@ETag() // weak ETag from the JSON body hash; { weak: false } for strong
+article(c: Context) { return this.repo.find(Param(c, 'id')); }
+// client sends If-None-Match: <tag> → matching tag returns 304 + empty body
+```
+
+`@ETag` hashes the serialized result (SHA-256, truncated) — it applies to
+JSON-serializable handler returns; a raw `Response` return bypasses it. The
+tag is stable for identical bodies, so unchanged resources answer `304 Not
+Modified` without transferring the payload.
+
 ### `@Throttle`
 
 Limits how often a method can be called. Throws `HttpException(429)` (with `retryAfterMs` in `meta`) if called again before `ms` milliseconds have passed.
@@ -1584,6 +1635,31 @@ const stopJobs = startScheduler(Janitor); // or a @Module class
 - Job errors are logged via `LOGGER`; the loop never crashes.
 - Timers are `unref`'d — they don't keep the process alive.
 
+### Cron jobs — `@Cron` (no dependency)
+
+Standard 5-field cron expressions (`min hour dom mon dow`, local time) — fields
+support `*`, `*/n`, `a-b`, `a-b/n`, and `a,b,c` lists:
+
+```ts
+import { Cron } from 'hono-forge';
+
+@Injectable() @Singleton()
+class Jobs {
+  @Cron('0 2 * * *')          // daily 02:00
+  nightlyBackup() { /* ... */ }
+
+  @Cron('*/15 9-17 * * 1-5')  // every 15 min, 09:00–17:00, Mon–Fri
+  pollFeed() { /* ... */ }
+}
+```
+
+- Day-of-month and day-of-week combine with OR semantics (Vixie cron): when
+  both are restricted, a date matching EITHER fires.
+- Each run computes the next wall-clock fire time — survives clock drift/DST.
+- Invalid expressions are logged via `LOGGER` at `startScheduler` and skipped.
+- `parseCron(expr)` / `nextCronTime(expr|parsed, from?)` are exported if you
+  need the primitives.
+
 ---
 
 ## Operational helpers
@@ -1604,6 +1680,25 @@ mountHealth(app, {
 // GET /health → 200 { status: 'ok', uptime, checks } or 503 when a check fails/throws
 ```
 
+With `probes: true`, Kubernetes-style liveness/readiness endpoints are mounted
+alongside the combined `/health`:
+
+```ts
+mountHealth(app, {
+  probes: true,
+  checks: { db: () => db.ping() },        // → /health/ready
+  liveChecks: { deadlock: () => true },    // → /health/live (optional)
+});
+// GET /health/live  → 200 process alive (never touches downstream deps)
+// GET /health/ready → 200 only when `checks` all pass
+// GET /health       → combined behaviour, unchanged
+```
+
+A failing readiness check returns 503 — traffic stops, pod keeps running. A
+failing `liveChecks` check returns 503 on `/live` — the orchestrator restarts
+the pod. Keep `liveChecks` free of downstream dependencies: a dead database
+must not trigger a restart loop.
+
 ### Graceful shutdown — `gracefulShutdown`
 
 ```ts
@@ -1612,10 +1707,35 @@ import { gracefulShutdown } from 'hono-forge';
 const detach = gracefulShutdown({
   timeoutMs: 10_000, // hard deadline before force-exit(1)
   onShutdown: async () => { await server.stop(); },
+  drainChannels: true, // default — see below
 });
-// SIGINT/SIGTERM → onShutdown() → container.shutdown() (@OnModuleDestroy hooks) → exit(0)
+// SIGINT/SIGTERM → onShutdown() → channels.close() → container.shutdown() → exit(0)
 // returns a detach function that removes the signal listeners
 ```
+
+`drainChannels` (default `true`) closes every channel subscriber transport
+during shutdown — SSE streams and WebSocket connections registered via
+`@ChannelRoute`/`channels` get a clean close (WS `1001 Going Away`) instead of
+an abrupt drop, and adapter resources (e.g. Redis pub/sub connections) are
+released.
+
+### Prometheus metrics — `mountMetrics`
+
+```ts
+import { mountMetrics } from 'hono-forge';
+
+const app = new Hono();
+mountMetrics(app); // BEFORE building routes — middleware wraps every handler
+// GET /metrics → Prometheus text exposition format
+```
+
+Emits `http_requests_total{method,route,status}` and
+`http_request_duration_seconds` histogram (default buckets 0.005–10s). The
+metrics path is never self-counted; `options.exclude` skips extra paths.
+`@TrackMetrics` durations also land in the same registry as
+`hono_forge_method_duration_seconds{method,status}` — one scrape covers both.
+
+`createApp` wires it too: `createApp(AppModule, { metrics: true })`.
 
 ### Route table — `printRoutes`
 

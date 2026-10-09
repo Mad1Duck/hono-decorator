@@ -38,6 +38,7 @@ export function inMemoryRateLimiter(options: RateLimiterFactoryOptions): HonoMid
     c.header('X-RateLimit-Reset', String(Math.ceil(entry.resetAt / 1000)));
 
     if (entry.count > options.max) {
+      c.header('Retry-After', String(Math.ceil((entry.resetAt - now) / 1000)));
       throw HttpException.tooManyRequests(options.message ?? 'Too many requests', {
         meta: { retryAfterMs: entry.resetAt - now },
       });
@@ -98,6 +99,7 @@ export function redisRateLimiter(client: RedisRateLimitClient): RateLimiterFacto
     c.header('X-RateLimit-Reset', String(Math.ceil(resetAt / 1000)));
 
     if (count > options.max) {
+      c.header('Retry-After', String(Math.ceil(Math.max(ttlMs, 0) / 1000)));
       throw HttpException.tooManyRequests(options.message ?? 'Too many requests', {
         meta: { retryAfterMs: Math.max(ttlMs, 0) },
       });

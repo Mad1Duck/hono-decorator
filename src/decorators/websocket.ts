@@ -27,3 +27,35 @@ export function WebSocket(path = ''): (value: Function, context: ClassMethodDeco
     Get(path)(value, context);
   };
 }
+
+/**
+ * Route a WebSocket message by its `event` field to a sibling method on the
+ * same controller — Socket.IO-style multiplexing inside one connection.
+ *
+ * Incoming text frames are parsed as JSON envelopes:
+ *   { "event": "<name>", "data": <payload> }
+ *
+ * When `parsed.event` matches, the decorated method runs as
+ * `(data, ws, rawEvent)`. Non-JSON frames, messages without an `event`
+ * field, and unmatched events fall through to the route's own
+ * `onMessage` callback (returned by the @WebSocket handler), if any.
+ *
+ * @example
+ * @WebSocket('/chat')
+ * chat(c: Context) {
+ *   return { onOpen: (_e, ws) => ws.send('welcome') };
+ * }
+ *
+ * @OnWsMessage('join')
+ * onJoin(data: { room: string }, ws) { this.rooms.join(data.room, ws); }
+ *
+ * @OnWsMessage('message')
+ * onChat(data: { text: string }, ws) { ws.send(`Echo: ${data.text}`); }
+ */
+export function OnWsMessage(event: string): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.WS_MESSAGE] as Record<string, string> | undefined) ?? {};
+    all[String(context.name)] = event;
+    context.metadata[METADATA_KEYS.WS_MESSAGE] = all;
+  };
+}

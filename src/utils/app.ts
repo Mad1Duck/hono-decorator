@@ -4,6 +4,8 @@ import { OpenAPIGenerator } from '../openapi/generator';
 import type { OpenAPIGenerateOptions, OpenAPIMountOptions } from '../openapi/generator';
 import { mountHealth } from './health';
 import type { HealthOptions } from './health';
+import { mountMetrics } from './metrics';
+import type { MetricsOptions } from './metrics';
 import { gracefulShutdown } from './shutdown';
 import type { GracefulShutdownOptions } from './shutdown';
 
@@ -23,6 +25,11 @@ export interface CreateAppOptions {
   openapi?: OpenAPIGenerateOptions & OpenAPIMountOptions;
   /** Print the route table (method/path/handler/guards) at startup. */
   printRoutes?: boolean;
+  /**
+   * Collect HTTP metrics and mount `GET /metrics` (Prometheus text format).
+   * Pass `true` for defaults, or `{ path, buckets, exclude }`.
+   */
+  metrics?: boolean | MetricsOptions;
   /**
    * Wire SIGINT/SIGTERM → `container.shutdown()` → exit.
    * Pass `true` for defaults, or `{ timeoutMs, onShutdown }`.
@@ -48,6 +55,9 @@ export interface CreateAppOptions {
  */
 export function createApp(ModuleClass: Function, options: CreateAppOptions = {}): Hono {
   const app = new Hono();
+  if (options.metrics) {
+    mountMetrics(app, options.metrics === true ? {} : options.metrics);
+  }
   app.route('/', HonoRouteBuilder.buildModule(ModuleClass));
 
   if (options.health) {

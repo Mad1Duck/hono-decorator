@@ -1,5 +1,6 @@
 import { container } from './container';
 import { getLogger } from './logger';
+import { nextCronTime, parseCron } from './cron';
 import { METADATA_KEYS } from '../decorators/metadata';
 import type { ModuleMetadata, ScheduleMetadata } from '../decorators/metadata';
 import type { ConcreteConstructor } from './types';
@@ -43,13 +44,14 @@ function collectTargets(targets: Function[], seen = new Set<Function>()): Functi
  * jobs throw on tick (no request scope exists); keep jobs singleton/transient.
  */
 export function startScheduler(...targets: Function[]): () => void {
-  const timers: Array<ReturnType<typeof setInterval>> = [];
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  let stoppedAll = false;
 
   for (const cls of collectTargets(targets)) {
     const scheduled = classMeta(cls)?.[METADATA_KEYS.SCHEDULE] as Record<string, ScheduleMetadata> | undefined;
     if (!scheduled) continue;
 
-    for (const [method, { everyMs, immediate }] of Object.entries(scheduled)) {
+    for (const [method, meta] of Object.entries(scheduled)) {
       let running = false;
       const tick = async (): Promise<void> => {
         if (running) return;
@@ -65,15 +67,36 @@ export function startScheduler(...targets: Function[]): () => void {
         }
       };
 
-      const timer = setInterval(() => void tick(), everyMs);
-      timer.unref?.();
-      timers.push(timer);
-      if (immediate) void tick();
+      if (meta.cron) {
+        // Cron entries fire at wall-clock times: compute the delay to the next
+        // matching minute after each run, surviving clock drift/DST shifts.
+        let parsed;
+        try {
+          parsed = parseCron(meta.cron);
+        } catch (error) {
+          getLogger().error?.({ job: `${cls.name}.${method}`, error }, 'Invalid cron expression — job skipped');
+          continue;
+        }
+        const scheduleNext = (): void => {
+          if (stoppedAll) return;
+          const delay = Math.max(nextCronTime(parsed).getTime() - Date.now(), 0);
+          const timer = setTimeout(() => void tick().finally(scheduleNext), delay);
+          timer.unref?.();
+          timers.push(timer);
+        };
+        scheduleNext();
+      } else {
+        const timer = setInterval(() => void tick(), meta.everyMs ?? 0);
+        timer.unref?.();
+        timers.push(timer);
+      }
+      if (meta.immediate) void tick();
     }
   }
 
   return () => {
-    for (const t of timers) clearInterval(t);
+    stoppedAll = true;
+    for (const t of timers) clearTimeout(t);
     timers.length = 0;
   };
 }

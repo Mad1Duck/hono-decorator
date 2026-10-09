@@ -33,3 +33,30 @@ export function Interval(
     context.metadata[METADATA_KEYS.SCHEDULE] = all;
   };
 }
+
+/**
+ * Schedule a service method on a standard 5-field cron expression
+ * (`min hour day-of-month month day-of-week`), evaluated in local time.
+ * Activated by `startScheduler([...])` alongside @Interval.
+ *
+ * Fields support `*`, `*\/n`, `a`, `a-b`, `a-b/n`, and `a,b,c` lists.
+ * When both day-of-month and day-of-week are restricted, EITHER may match
+ * (Vixie cron semantics).
+ *
+ * @example
+ * @Cron('0 2 * * *')        // daily at 02:00
+ * nightlyBackup() { ... }
+ *
+ * @Cron('*\/15 9-17 * * 1-5') // every 15 min, 09:00–17:00, Mon–Fri
+ * pollFeed() { ... }
+ */
+export function Cron(
+  expression: string,
+  options: IntervalOptions = {}
+): (value: Function, context: ClassMethodDecoratorContext) => void {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.SCHEDULE] as Record<string, ScheduleMetadata> | undefined) ?? {};
+    all[String(context.name)] = { cron: expression, immediate: options.immediate };
+    context.metadata[METADATA_KEYS.SCHEDULE] = all;
+  };
+}

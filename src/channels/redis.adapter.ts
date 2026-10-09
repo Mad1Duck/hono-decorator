@@ -99,6 +99,11 @@ export class RedisChannelAdapter implements ChannelAdapter {
   }
 
   async close(): Promise<void> {
+    for (const clients of this.localClients.values()) {
+      for (const client of clients) {
+        try { await client.close?.(); } catch { /* draining is best-effort */ }
+      }
+    }
     this.localClients.clear();
     await this.sub.quit();
     await this.pub.quit();
