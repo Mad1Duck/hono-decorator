@@ -4,6 +4,7 @@ import type { Context } from 'hono';
 import {
   CacheControl,
   ChannelRegistry,
+  Concurrency,
   Controller,
   Cron,
   ETag,
@@ -17,6 +18,7 @@ import {
   mountMetrics,
   getMetricsRegistry,
   getRequestDrain,
+  OnBootstrap,
   OnWsMessage,
   Public,
   RateLimit,
@@ -367,7 +369,7 @@ describe('route collision detection', () => {
     const warnings: string[] = [];
     registerLogger({
       info: () => {},
-      warn: (_d, m) => { warnings.push(String(m ?? _d)); },
+      warn: (_d: unknown, m?: string) => { warnings.push(String(m ?? _d)); },
       error: () => {},
       debug: () => {},
     } as never);
@@ -392,6 +394,73 @@ describe('route collision detection', () => {
     } finally {
       registerLogger(console as never); // restore console-backed default
     }
+  });
+});
+
+/* ================= ON BOOTSTRAP ================= */
+
+describe('@OnBootstrap', () => {
+  it('runs hooks after the module is built — once per class', async () => {
+    const ran: string[] = [];
+    @Injectable()
+    @Singleton()
+    class BootstrapSvc {
+      @OnBootstrap()
+      ready() { ran.push('svc.ready'); }
+    }
+    @Controller('/boot')
+    @Injectable()
+    class BootController {
+      @OnBootstrap()
+      onReady() { ran.push('ctrl.onReady'); }
+
+      @Get() @Public()
+      ping() { return 'pong'; }
+    }
+    @Module({ providers: [BootstrapSvc], controllers: [BootController] })
+    class BootModule {}
+
+    HonoRouteBuilder.buildModule(BootModule);
+    await new Promise((r) => setTimeout(r, 20)); // hooks run detached
+    expect(ran).toContain('svc.ready');
+    expect(ran).toContain('ctrl.onReady');
+
+    // idempotent — a second build does not re-run hooks
+    HonoRouteBuilder.buildModule(BootModule);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ran.filter((x) => x === 'svc.ready')).toHaveLength(1);
+  });
+});
+
+/* ================= CONCURRENCY ================= */
+
+describe('@Concurrency', () => {
+  it('rejects excess parallel requests with 503 CONCURRENCY_LIMIT', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+
+    @Controller('/bulk')
+    @Injectable()
+    class BulkController {
+      @Get() @Public() @Concurrency(1)
+      async slow() { await gate; return { ok: true }; }
+    }
+    const app = HonoRouteBuilder.build(BulkController);
+
+    const first = app.fetch(makeRequest('/bulk'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const second = await app.fetch(makeRequest('/bulk'));
+    expect(second.status).toBe(503);
+    const body = (await second.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('CONCURRENCY_LIMIT');
+
+    release();
+    expect((await first).status).toBe(200);
+
+    // slot freed — next request passes
+    const third = await app.fetch(makeRequest('/bulk'));
+    expect(third.status).toBe(200);
   });
 });
 

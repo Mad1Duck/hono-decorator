@@ -34,6 +34,8 @@ export const METADATA_KEYS = {
   RESPONSE_STATUS: Symbol.for('hono-forge.responseStatus'),
   ON_EVENT: Symbol.for('hono-forge.onEvent'),
   SCHEDULE: Symbol.for('hono-forge.schedule'),
+  ON_BOOTSTRAP: Symbol.for('hono-forge.onBootstrap'),
+  CONCURRENCY: Symbol.for('hono-forge.concurrency'),
   RATE_LIMIT: Symbol.for('hono-forge.rateLimit'),
   OPENAPI: Symbol.for('hono-forge.openapi'),
   CLASS_OPENAPI: Symbol.for('hono-forge.classOpenapi'),

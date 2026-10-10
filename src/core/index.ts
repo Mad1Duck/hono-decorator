@@ -4,6 +4,7 @@ export * from './container';
 export * from './cron';
 export * from './events';
 export * from './http-exception';
+export * from './lifecycle';
 export * from './logger';
 export * from './rate-limit';
 export { getRequestContext, getContext } from './request-context';

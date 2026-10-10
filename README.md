@@ -12,7 +12,7 @@ NestJS-style decorators for [Hono](https://hono.dev) — controller routing, dep
 - **Guards** — `@RequireAuth`, `@RequireRole`, `@RequireAllRoles`, `@RequirePermission`, `@RequireAnyPermission` with pluggable executor
 - **`@Validate`** — one Zod schema drives both request validation and the OpenAPI spec
 - **Rate limiting** — `@RateLimit` works out of the box (in-memory), pluggable to Redis via factory; `429` responses carry `Retry-After`
-- **Idempotency** — `@Idempotent` replays responses per `Idempotency-Key`; `@SingleFlight` dedupes concurrent identical requests
+- **Idempotency** — `@Idempotent` replays responses per `Idempotency-Key`; `@SingleFlight` dedupes concurrent identical requests; `@Concurrency` caps simultaneous executions per route
 - **Middleware** — `@Middleware` / `@Use` at class or method level; built-in `@Cors`, `@Compress`, `@SecureHeaders`, `@PrettyJson`
 - **Auto-discovery** — `discoverControllers` (Bun) and `fromModules` (any bundler)
 - **SSE** — `@Sse` with optional keepalive — handler receives `(c: Context, stream: SSEStreamingApi)`
@@ -379,6 +379,26 @@ class RedisClient implements OnInit, OnDestroy {
   }
 }
 ```
+
+### `@OnBootstrap` — post-build startup hooks
+
+`OnInit` fires when a provider is resolved; `@OnBootstrap` fires after `buildModule()` finishes — every route is mounted and every singleton is booted. Use it for seed data, cache warming, or emitting a "ready" event:
+
+```ts
+import { OnBootstrap } from 'hono-forge';
+
+@Injectable()
+@Singleton()
+class SeedService {
+  @OnBootstrap()
+  async seed() {
+    if (await db.users.count() === 0) await db.users.insert(admin);
+  }
+}
+```
+
+- Runs once per module build, sequentially, awaited before `buildModule` returns
+- Only valid on singleton-resolvable providers — `@RequestScoped` classes are rejected (`hono-forge doctor` flags this too)
 
 ### `container.boot()` / `container.shutdown()`
 
@@ -1419,6 +1439,18 @@ async report(c: Context) { return generateExpensiveReport(); }
 ```
 
 > Keyed by URL, not request body — intended for reads or endpoints where identical concurrent requests are semantically equal. For client-driven mutations use `@Idempotent`.
+
+### `@Concurrency` — per-route bulkhead
+
+Caps simultaneous executions of a route. When the limit is saturated the request is rejected with `503 Service Unavailable` — shed load fast instead of queueing unbounded work on an expensive endpoint. Pairs with circuit breakers: `@SingleFlight` dedupes identical calls, `@Concurrency` caps total load.
+
+```ts
+@Get('/export')
+@Concurrency(4)   // at most 4 exports running; the 5th gets 503 until a slot frees
+async exportAll(c: Context) { return buildHugeCsv(); }
+```
+
+Slots are released in `finally` — exceptions and early returns never leak capacity. The rejection goes through the standard `HttpException` error path, so filters and error responses behave normally.
 
 ### `@Header` / `@Redirect`
 

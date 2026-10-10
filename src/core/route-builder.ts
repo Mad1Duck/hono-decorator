@@ -10,6 +10,7 @@ import type { CacheAdapter } from './cache';
 import { HttpException } from './http-exception';
 import { inMemoryRateLimiter } from './rate-limit';
 import { getLogger } from './logger';
+import { runBootstrap } from './lifecycle';
 import { createRequestContext, runInRequestContext } from './request-context';
 import { METADATA_KEYS } from '../decorators/metadata';
 import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
@@ -358,6 +359,10 @@ export class HonoRouteBuilder {
       }
       app.route('/', this.build(cls, platform, options, seenRoutes));
     }
+
+    // @OnBootstrap — app-level "ready" hooks after every route is mounted.
+    // Detached: errors are logged, the build never fails because of a hook.
+    void runBootstrap(...providers as Function[], ...controllers as Function[]);
     return app;
   }
 
@@ -740,6 +745,9 @@ export class HonoRouteBuilder {
     const cacheControlMeta = allCacheControl[handlerName];
     const allEtag = (meta?.[METADATA_KEYS.ETAG] as Record<string, { weak: boolean }> | undefined) ?? {};
     const etagMeta = allEtag[handlerName];
+    const allConcurrency = (meta?.[METADATA_KEYS.CONCURRENCY] as Record<string, number> | undefined) ?? {};
+    const concurrencyMeta = allConcurrency[handlerName];
+    let inflightCount = 0;
     const allRedirect = (meta?.[METADATA_KEYS.REDIRECT] as Record<string, RedirectMetadata> | undefined) ?? {};
     const redirectMeta = allRedirect[handlerName];
     const allStatus = (meta?.[METADATA_KEYS.RESPONSE_STATUS] as Record<string, ResponseStatusMetadata> | undefined) ?? {};
@@ -807,6 +815,16 @@ export class HonoRouteBuilder {
         return runInRequestContext(ctx, () =>
           container.runInScope(async () => {
           try {
+            // @Concurrency bulkhead — fail fast with 503 when saturated.
+            if (concurrencyMeta !== undefined) {
+              if (inflightCount >= concurrencyMeta) {
+                throw HttpException.serviceUnavailable(
+                  `Concurrency limit reached (max ${concurrencyMeta})`,
+                  { code: 'CONCURRENCY_LIMIT' }
+                );
+              }
+              inflightCount += 1;
+            }
             const inst = getController();
             const fn = inst[handlerName];
             if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
@@ -860,6 +878,8 @@ export class HonoRouteBuilder {
               return c.json(body, error.status as Parameters<typeof c.json>[1]);
             }
             throw error;
+          } finally {
+            if (concurrencyMeta !== undefined) inflightCount -= 1;
           }
         })
         );

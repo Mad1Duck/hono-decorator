@@ -166,21 +166,29 @@ async function main(): Promise<void> {
       }
     }
 
-    // 3. Scheduler — invalid cron expressions and request-scoped jobs.
+    // 3. Scheduler + bootstrap — invalid cron expressions and lifecycle
+    //    methods that cannot resolve outside a request scope.
     for (const cls of [...providers, ...controllers]) {
       const sched = getClassMeta(cls, METADATA_KEYS.SCHEDULE) as Record<string, ScheduleMetadata> | undefined;
-      if (!sched) continue;
       const requestScoped = getClassMeta(cls, METADATA_KEYS.REQUEST_SCOPED) !== undefined;
-      for (const [method, meta] of Object.entries(sched)) {
-        if (meta.cron) {
-          try {
-            parseCron(meta.cron);
-          } catch (err) {
-            issues.push(`cron: ${cls.name}.${method} — ${err instanceof Error ? err.message : String(err)}`);
+      if (sched) {
+        for (const [method, meta] of Object.entries(sched)) {
+          if (meta.cron) {
+            try {
+              parseCron(meta.cron);
+            } catch (err) {
+              issues.push(`cron: ${cls.name}.${method} — ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          if (requestScoped) {
+            issues.push(`schedule: ${cls.name}.${method} is on a @RequestScoped class — no request scope exists at tick time`);
           }
         }
-        if (requestScoped) {
-          issues.push(`schedule: ${cls.name}.${method} is on a @RequestScoped class — no request scope exists at tick time`);
+      }
+      const boot = getClassMeta(cls, METADATA_KEYS.ON_BOOTSTRAP) as Record<string, boolean> | undefined;
+      if (boot && requestScoped) {
+        for (const method of Object.keys(boot)) {
+          issues.push(`bootstrap: ${cls.name}.${method} (@OnBootstrap) is on a @RequestScoped class — cannot resolve outside a request scope`);
         }
       }
     }

@@ -64,6 +64,25 @@ export function RateLimit(options: RateLimitMetadata): MethodDec {
   };
 }
 
+/**
+ * Bulkhead — cap concurrent executions of this route to `n`. Requests beyond
+ * the limit get a fast `503 CONCURRENCY_LIMIT` instead of queueing, protecting
+ * expensive endpoints from load pile-up. Complements `@SingleFlight` (which
+ * dedupes identical in-flight calls) and `@RateLimit` (which is per-window).
+ *
+ * @example
+ * @Get('/report')
+ * @Concurrency(2)
+ * async report(c: Context) { return generateExpensiveReport(); }
+ */
+export function Concurrency(max: number): MethodDec {
+  return (_value, context) => {
+    const all = (context.metadata[METADATA_KEYS.CONCURRENCY] as Record<string, number> | undefined) ?? {};
+    all[String(context.name)] = max;
+    context.metadata[METADATA_KEYS.CONCURRENCY] = all;
+  };
+}
+
 /* ================= PUBLIC ================= */
 
 export function Public(): MethodDec {
