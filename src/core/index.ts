@@ -6,6 +6,7 @@ export * from './events';
 export * from './http-exception';
 export * from './lifecycle';
 export * from './logger';
+export * from './problem';
 export * from './rate-limit';
 export { getRequestContext, getContext } from './request-context';
 export type { RequestContext as RequestScopeContext } from './request-context';

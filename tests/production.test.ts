@@ -32,6 +32,8 @@ import {
   startScheduler,
 } from '../src';
 import type { ChannelClient, RedisRateLimitClient } from '../src';
+import { HttpException, Post, Validate } from '../src';
+import { z } from 'zod';
 
 const makeRequest = (path: string, init?: RequestInit): Request =>
   new Request(`http://test.local${path}`, init);
@@ -490,6 +492,51 @@ describe('hono-forge doctor', () => {
   });
 });
 
+/* ================= CLI client ================= */
+
+describe('hono-forge client', () => {
+  it('generates a typed route map from the example module', async () => {
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = await mkdtemp(join(tmpdir(), 'hono-forge-client-'));
+    const out = join(dir, 'routes.gen.ts');
+    try {
+      const proc = Bun.spawnSync(
+        [process.execPath, 'src/cli.ts', 'client', 'examples/todo-api/index.ts', '--out', out],
+        { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' }
+      );
+      expect(proc.exitCode).toBe(0);
+      const code = await Bun.file(out).text();
+      expect(code).toContain('export interface AppRoutes');
+      expect(code).toContain("'GET /todos':");
+      expect(code).toContain("'POST /todos':");
+      expect(code).toContain('TodoController');
+      // SSE route excluded — not representable in a fetch client
+      expect(code).not.toContain('/feed/');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('shows per-command help and suggests corrections', () => {
+    const help = Bun.spawnSync(
+      [process.execPath, 'src/cli.ts', 'flows', '--help'],
+      { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' }
+    );
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout.toString()).toContain('hono-forge flows');
+    expect(help.stdout.toString()).toContain('--base-url');
+
+    const typo = Bun.spawnSync(
+      [process.execPath, 'src/cli.ts', 'clent'],
+      { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' }
+    );
+    expect(typo.exitCode).toBe(1);
+    expect(typo.stderr.toString()).toContain("did you mean 'client'");
+  });
+});
+
 /* ================= CACHE CONTROL / ETAG ================= */
 
 describe('@CacheControl / @ETag', () => {
@@ -539,5 +586,69 @@ describe('@CacheControl / @ETag', () => {
   it('ETag({ weak: false }) emits a strong tag', async () => {
     const res = await app.fetch(makeRequest('/cached/strong'));
     expect(res.headers.get('ETag')).toMatch(/^"[0-9a-f]+"$/);
+  });
+});
+
+/* ================= RFC 9457 PROBLEM DETAILS ================= */
+
+describe('errorFormat: problem (RFC 9457)', () => {
+  it('HttpException renders application/problem+json', async () => {
+    @Controller('/prob')
+    @Injectable()
+    class ProbController {
+      @Get('/missing') @Public()
+      missing() { throw HttpException.notFound('User 42 not found', { meta: { userId: '42' } }); }
+
+      @Post('/echo') @Public()
+      @Validate({ body: z.object({ name: z.string() }) })
+      echo() { return { ok: true }; }
+    }
+
+    HonoRouteBuilder.configure({ errorFormat: 'problem' });
+    try {
+      const app = HonoRouteBuilder.build(ProbController);
+
+      const res = await app.fetch(makeRequest('/prob/missing'));
+      expect(res.status).toBe(404);
+      expect(res.headers.get('content-type')).toContain('application/problem+json');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.type).toBe('about:blank');
+      expect(body.title).toBe('Not Found');
+      expect(body.status).toBe(404);
+      expect(body.detail).toBe('User 42 not found');
+      expect(body.instance).toBe('/prob/missing');
+      expect(body.code).toBe('NOT_FOUND');
+      // meta fields are spread as extension members
+      expect(body.userId).toBe('42');
+
+      // ZodError → 400 problem+json with issues as 'errors' extension
+      const bad = await app.fetch(makeRequest('/prob/echo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 1 }),
+      }));
+      expect(bad.status).toBe(400);
+      expect(bad.headers.get('content-type')).toContain('application/problem+json');
+      const vbody = await bad.json() as Record<string, unknown>;
+      expect(vbody.code).toBe('VALIDATION_ERROR');
+      expect(Array.isArray(vbody.errors)).toBe(true);
+    } finally {
+      HonoRouteBuilder.configure({ errorFormat: 'envelope' });
+    }
+  });
+
+  it('envelope stays the default', async () => {
+    @Controller('/env')
+    @Injectable()
+    class EnvController {
+      @Get() @Public()
+      boom() { throw HttpException.forbidden('nope'); }
+    }
+    const app = HonoRouteBuilder.build(EnvController);
+    const res = await app.fetch(makeRequest('/env'));
+    expect(res.status).toBe(403);
+    const body = await res.json() as { status: string; error: { code: string } };
+    expect(body.status).toBe('error');
+    expect(body.error.code).toBe('FORBIDDEN');
   });
 });

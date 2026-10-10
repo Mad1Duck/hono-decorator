@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getClassMeta, METADATA_KEYS } from './decorators/metadata';
 import type { ScheduleMetadata } from './decorators/metadata';
@@ -8,32 +8,138 @@ import { HonoRouteBuilder } from './core/route-builder';
 import { container } from './core/container';
 import { parseCron } from './core/cron';
 import { OpenAPIGenerator } from './openapi/generator';
+import { generateClientTypes } from './utils/client';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
+
+interface CommandSpec {
+  desc: string;
+  opts: [flag: string, desc: string][];
+  /** Example invocations shown in `<command> --help`. */
+  examples: string[];
+}
+
+const COMMON_OPTS: [string, string][] = [
+  ['--export <name>', 'pick this export when the file exports several\n                     @Module/@Controller classes'],
+];
+
+const COMMANDS: Record<string, CommandSpec> = {
+  flows: {
+    desc: 'api-tester .flow.yaml files',
+    opts: [
+      ['--out <dir>', 'output dir (default ./flows)'],
+      ['--base-url <url>', 'flow settings baseUrl (default http://localhost:3000)'],
+      ['--single', 'one file with a visual group per controller'],
+      ...COMMON_OPTS,
+    ],
+    examples: [
+      'bunx hono-forge flows ./src/app.module.ts --out ./flows',
+      'bunx hono-forge flows ./src/app.module.ts --single --base-url http://localhost:3000',
+      '# then in api-tester: Import flow → pick a .flow.yaml → Run',
+    ],
+  },
+  openapi: {
+    desc: 'OpenAPI 3.1 spec → JSON file',
+    opts: [
+      ['--out <file>', 'output file (default ./openapi.json)'],
+      ['--title <text>', 'info.title (default: entry file name)'],
+      ['--version <ver>', 'info.version (default 1.0.0)'],
+      ...COMMON_OPTS,
+    ],
+    examples: [
+      'bunx hono-forge openapi ./src/app.module.ts --out openapi.json',
+      'bunx hono-forge openapi ./src/app.module.ts --title "Todo API" --version 2.1.0',
+      '# feed the file to Swagger UI, api-tester "Import from API", or codegen',
+    ],
+  },
+  routes: {
+    desc: 'print the route table',
+    opts: [...COMMON_OPTS],
+    examples: [
+      'bunx hono-forge routes ./src/app.module.ts',
+      '# method / path / handler / guards / middleware / flags — no server needed',
+    ],
+  },
+  graph: {
+    desc: 'print the DI dependency graph',
+    opts: [...COMMON_OPTS],
+    examples: [
+      'bunx hono-forge graph ./src/app.module.ts',
+      '# shows provider scopes, constructor deps, and "missing" warnings',
+    ],
+  },
+  doctor: {
+    desc: 'static wiring check — exit 1 on issues (CI guard)',
+    opts: [...COMMON_OPTS],
+    examples: [
+      'bunx hono-forge doctor ./src/app.module.ts',
+      '# CI: fails on missing DI deps, route collisions, bad @Cron,',
+      '# and @Interval/@OnBootstrap on @RequestScoped classes',
+    ],
+  },
+  client: {
+    desc: 'typed client route map → .ts file',
+    opts: [
+      ['--out <file>', 'output file (default ./routes.gen.ts)'],
+      ['--name <ident>', 'exported interface name (default AppRoutes)'],
+      ['--import-path <p>', 'module specifier the generated file imports\n                     controller types from (default: entry file relative\n                     to the output — controllers must be exported from it)'],
+      ...COMMON_OPTS,
+    ],
+    examples: [
+      'bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts',
+      '# then: import { createClient } from "hono-forge"',
+      '#       import type { AppRoutes } from "./routes.gen"',
+      '#       const api = createClient<AppRoutes>("http://localhost:3000")',
+    ],
+  },
+};
+
+function commandHelp(name: string): string {
+  const spec = COMMANDS[name]!;
+  const lines = [`hono-forge ${name} — ${spec.desc}`, '', `Usage:`, `  hono-forge ${name} <entry-file> [options]`, '', `Options:`];
+  for (const [flag, desc] of spec.opts) lines.push(`  ${flag.padEnd(20)} ${desc}`);
+  lines.push(`  ${'-h, --help'.padEnd(20)} show this help`);
+  if (spec.examples.length) {
+    lines.push('', 'Examples:');
+    for (const ex of spec.examples) lines.push(`  ${ex}`);
+  }
+  lines.push('', `The entry file must export your @Module class (or @Controller classes).`, `TypeScript entries need Bun: bunx hono-forge ${name} ./src/app.module.ts`);
+  return lines.join('\n');
+}
 
 const HELP = `hono-forge — CLI
 
-Usage:
-  hono-forge flows   <entry-file> [options]   api-tester .flow.yaml files
-  hono-forge openapi <entry-file> [options]   OpenAPI 3.1 spec → JSON file
-  hono-forge routes  <entry-file> [options]   print the route table
-  hono-forge graph   <entry-file> [options]   print the DI dependency graph
-  hono-forge doctor  <entry-file> [options]   static wiring check (CI guard)
+Usage: hono-forge <command> <entry-file> [options]
 
-Options:
-  --out <path>       flows: output dir (default ./flows)
-                     openapi: output file (default ./openapi.json)
-  --base-url <url>   flows: baseUrl for flow settings
-                     (default: http://localhost:3000)
-  --single           flows: one .flow.yaml with a group per controller
-  --export <name>    Named export when the file exports several
-                     @Module/@Controller classes
-  --title <text>     openapi: info.title (default: entry file name)
-  --version <ver>    openapi: info.version (default: 1.0.0)
-  -h, --help         Show this help
+Commands:
+${Object.entries(COMMANDS).map(([name, s]) => `  ${name.padEnd(9)} ${s.desc}`).join('\n')}
 
-The entry file must export your @Module class (or @Controller classes).
-TypeScript entry files need Bun: bunx hono-forge flows ./src/app.module.ts
+Run 'hono-forge help <command>' or 'hono-forge <command> --help' for
+command options and examples. The entry file must export your @Module
+class (or @Controller classes). TypeScript entries need Bun.
+
+Example:
+  bunx hono-forge routes ./src/app.module.ts
 `;
+
+/** Levenshtein distance — for "did you mean" hints on typos. */
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j++) dp[0]![j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i]![j] = Math.min(dp[i - 1]![j]! + 1, dp[i]![j - 1]! + 1, dp[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return dp[a.length]![b.length]!;
+}
+
+function suggestCommand(input: string): string | undefined {
+  let best: string | undefined;
+  let bestDist = Infinity;
+  for (const name of Object.keys(COMMANDS)) {
+    const d = editDistance(input, name);
+    if (d < bestDist) { bestDist = d; best = name; }
+  }
+  return bestDist <= 2 ? best : undefined;
+}
 
 interface CliArgs {
   command?: string;
@@ -44,6 +150,8 @@ interface CliArgs {
   exportName?: string;
   title?: string;
   version?: string;
+  name?: string;
+  importPath?: string;
   help: boolean;
 }
 
@@ -59,6 +167,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--export') args.exportName = rest[++i]!;
     else if (a === '--title') args.title = rest[++i]!;
     else if (a === '--version') args.version = rest[++i]!;
+    else if (a === '--name') args.name = rest[++i]!;
+    else if (a === '--import-path') args.importPath = rest[++i]!;
     else if (a === '-h' || a === '--help') args.help = true;
     else if (!a.startsWith('-') && !args.entry) args.entry = a;
     else fail(`Unknown argument: ${a}`);
@@ -70,6 +180,13 @@ function fail(msg: string): never {
   console.error(`hono-forge: ${msg}\n`);
   console.error(HELP);
   process.exit(1);
+}
+
+/** './foo/bar' module specifier pointing from `fromDir` at `toFile` (extension stripped). */
+function relativeImport(fromDir: string, toFile: string): string {
+  let rel = relative(fromDir, toFile).replace(/\\/g, '/').replace(/\.[tj]sx?$/, '');
+  if (!rel.startsWith('.')) rel = `./${rel}`;
+  return rel;
 }
 
 /** Find the @Module class — or collect exported @Controller classes — from a module's exports. */
@@ -98,10 +215,20 @@ function resolveTarget(mod: Record<string, unknown>, exportName?: string): Funct
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help || !args.command) { console.log(HELP); return; }
-  if (!['flows', 'openapi', 'routes', 'graph', 'doctor'].includes(args.command)) {
-    fail(`Unknown command: '${args.command}'`);
+
+  // `hono-forge` / `hono-forge help` / `hono-forge help <command>`
+  if (args.command === 'help') {
+    console.log(args.entry && args.entry in COMMANDS ? commandHelp(args.entry) : HELP);
+    return;
   }
+  if (!args.command) { console.log(HELP); return; }
+  if (!(args.command in COMMANDS)) {
+    const suggestion = suggestCommand(args.command);
+    fail(`Unknown command: '${args.command}'` +
+      (suggestion ? ` — did you mean '${suggestion}'?` : ''));
+  }
+  // `hono-forge <command> --help` → per-command help
+  if (args.help) { console.log(commandHelp(args.command)); return; }
   if (!args.entry) fail(`Missing <entry-file> — e.g. hono-forge ${args.command} ./src/app.module.ts`);
 
   const entryPath = resolve(process.cwd(), args.entry);
@@ -208,6 +335,28 @@ async function main(): Promise<void> {
       ? (HonoRouteBuilder.moduleControllers(t) as Function[])
       : [t],
   );
+
+  if (args.command === 'client') {
+    const out = resolve(process.cwd(), args.out ?? './routes.gen.ts');
+    // The generated file imports controller types from the entry file by
+    // default — require it to re-export them, or pass --import-path.
+    const importPath = args.importPath ?? relativeImport(dirname(out), entryPath);
+    // The generated file `import type`s each controller by name — warn when
+    // one isn't exported from the entry module or the output won't compile.
+    const unexported = (controllers as Function[]).filter(c => !(c.name in mod));
+    if (unexported.length) {
+      console.warn(`hono-forge: warning — not exported from the entry file: ${unexported.map(c => c.name).join(', ')}`);
+      console.warn(`  The generated file imports types from '${importPath}' — export them there or pass --import-path.`);
+    }
+    const code = generateClientTypes({
+      controllers: controllers as never,
+      importPath,
+      exportName: args.name ?? 'AppRoutes',
+    });
+    await writeFile(out, code, 'utf8');
+    console.log(`Wrote ${out}`);
+    return;
+  }
 
   if (args.command === 'openapi') {
     const out = args.out ?? './openapi.json';

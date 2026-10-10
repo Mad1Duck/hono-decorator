@@ -78,7 +78,7 @@ class Janitor {
 
 @Controller('/todos')
 @Injectable([TodoService])
-class TodoController {
+export class TodoController {
   constructor(private svc: TodoService) {}
 
   @Get()
@@ -114,7 +114,7 @@ class TodoController {
 
 /** Live feed — every 'todo' channel event streams to connected browsers. */
 @Controller('/feed')
-class FeedController {
+export class FeedController {
   @Sse('/', { keepAliveMs: 15_000 })
   @Public()
   @ChannelRoute('todos')

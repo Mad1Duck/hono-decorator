@@ -8,6 +8,7 @@ import { container } from './container';
 import { defaultCacheAdapter } from './cache';
 import type { CacheAdapter } from './cache';
 import { HttpException } from './http-exception';
+import { problemResponse } from './problem';
 import { inMemoryRateLimiter } from './rate-limit';
 import { getLogger } from './logger';
 import { runBootstrap } from './lifecycle';
@@ -96,6 +97,13 @@ export interface RouteBuilderConfig {
   trailingSlash?: 'ignore' | 'strip' | 'add';
   strictValidation?: 'warn' | 'error' | 'off';
   exposeStack?: boolean | 'development';
+  /**
+   * Error response body format:
+   * - `'envelope'` (default) — `{ status, error: { code, message, meta? } }`
+   * - `'problem'` — RFC 9457 problem details (`application/problem+json`
+   *   with `type`, `title`, `status`, `detail`, `instance` + extensions)
+   */
+  errorFormat?: 'envelope' | 'problem';
   /** Pluggable store for @Cache / @CacheInvalidate — defaults to in-memory. */
   cacheAdapter?: CacheAdapter;
 }
@@ -427,30 +435,8 @@ export class HonoRouteBuilder {
         try {
           return await mw(c, next);
         } catch (error: unknown) {
-          const filtered = await applyFilters(error, c);
-          if (filtered) return filtered;
-          if (error instanceof ZodError) {
-            return c.json(
-              { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: error.issues } },
-              400
-            );
-          }
-          if (onError) {
-            const override = await onError(error, c);
-            if (override) return override;
-          }
-          if (error instanceof HttpException) {
-            const body: Record<string, unknown> = {
-              status: 'error',
-              error: {
-                code: error.code,
-                message: error.message,
-                ...(error.meta !== undefined ? { meta: error.meta } : {}),
-                ...(shouldExposeStack && error.stack ? { stack: error.stack } : {}),
-              },
-            };
-            return c.json(body, error.status as Parameters<typeof c.json>[1]);
-          }
+          const res = await respondToError(error, c);
+          if (res) return res;
           throw error;
         }
       };
@@ -481,6 +467,38 @@ export class HonoRouteBuilder {
         const filter = container.resolve(FilterClass as unknown as ConcreteConstructor<ExceptionFilter>);
         const result = await filter.catch(error, c);
         if (result !== undefined) return result;
+      }
+      return undefined;
+    };
+
+    const errorFormat = this.config.errorFormat ?? 'envelope';
+    /** Shared error path — filters → validation → onError → HttpException. */
+    const respondToError = async (error: unknown, c: Context): Promise<Response | undefined> => {
+      const filtered = await applyFilters(error, c);
+      if (filtered) return filtered;
+      if (error instanceof ZodError) {
+        if (errorFormat === 'problem') return problemResponse(c, error, shouldExposeStack)!;
+        return c.json(
+          { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: error.issues } },
+          400
+        );
+      }
+      if (onError) {
+        const override = await onError(error, c);
+        if (override) return override;
+      }
+      if (error instanceof HttpException) {
+        if (errorFormat === 'problem') return problemResponse(c, error, shouldExposeStack)!;
+        const body: Record<string, unknown> = {
+          status: 'error',
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(error.meta !== undefined ? { meta: error.meta } : {}),
+            ...(shouldExposeStack && error.stack ? { stack: error.stack } : {}),
+          },
+        };
+        return c.json(body, error.status as Parameters<typeof c.json>[1]);
       }
       return undefined;
     };
@@ -522,17 +540,17 @@ export class HonoRouteBuilder {
         try {
           const canActivate = await boundExecuteGuards(c, guards);
           if (!canActivate) {
-            return c.json({ status: 'error', error: { code: 'FORBIDDEN', message: 'Access denied' } }, 403);
+            throw HttpException.forbidden('Access denied');
           }
           await next();
         } catch (error) {
           if (error instanceof HttpException) throw error;
           if (error instanceof Error) {
             if (error.message.includes('Unauthorized')) {
-              return c.json({ status: 'error', error: { code: 'UNAUTHORIZED', message: error.message } }, 401);
+              throw HttpException.unauthorized(error.message);
             }
             if (error.message.includes('Forbidden')) {
-              return c.json({ status: 'error', error: { code: 'FORBIDDEN', message: error.message } }, 403);
+              throw HttpException.forbidden(error.message);
             }
           }
           throw error;
@@ -853,30 +871,8 @@ export class HonoRouteBuilder {
             }
             return c.body(null, statusMeta?.status as StatusCode | undefined);
           } catch (error: unknown) {
-            const filtered = await applyFilters(error, c);
-            if (filtered) return filtered;
-            if (error instanceof ZodError) {
-              return c.json(
-                { status: 'error', error: { code: 'VALIDATION_ERROR', message: 'Validation failed', details: error.issues } },
-                400
-              );
-            }
-            if (onError) {
-              const override = await onError(error, c);
-              if (override) return override;
-            }
-            if (error instanceof HttpException) {
-              const body: Record<string, unknown> = {
-                status: 'error',
-                error: {
-                  code: error.code,
-                  message: error.message,
-                  ...(error.meta !== undefined ? { meta: error.meta } : {}),
-                  ...(shouldExposeStack && error.stack ? { stack: error.stack } : {}),
-                },
-              };
-              return c.json(body, error.status as Parameters<typeof c.json>[1]);
-            }
+            const res = await respondToError(error, c);
+            if (res) return res;
             throw error;
           } finally {
             if (concurrencyMeta !== undefined) inflightCount -= 1;

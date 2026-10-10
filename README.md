@@ -1262,6 +1262,29 @@ All errors serialize to:
 { "status": "error", "error": { "code": "NOT_FOUND", "message": "User not found" } }
 ```
 
+### `errorFormat: 'problem'` — RFC 9457 problem details
+
+Prefer the standard `application/problem+json` shape over the custom envelope:
+
+```ts
+HonoRouteBuilder.configure({ errorFormat: 'problem' });
+```
+
+```jsonc
+// GET /users/42 → 404 application/problem+json
+{
+  "type": "about:blank",
+  "title": "Not Found",               // standard reason phrase
+  "status": 404,
+  "detail": "User 42 not found",      // the exception message
+  "instance": "/users/42",            // request path
+  "code": "USER_NOT_FOUND",           // HttpException code (extension member)
+  "userId": "42"                      // meta fields spread as extensions
+}
+```
+
+Validation failures produce a `400` problem with `code: "VALIDATION_ERROR"` and the Zod issues under `errors`. Headers set before the throw (e.g. `Retry-After`) are preserved. Envelope remains the default — opt in per app, migrate on your own schedule.
+
 ### `exposeStack`
 
 Controls whether `HttpException` stack traces appear in error responses:
@@ -1860,7 +1883,8 @@ class AuditService {
 End-to-end types from decorator metadata — `generateClientTypes` emits a route map where each `output` is the controller method's `Awaited<ReturnType>`, and `createClient` gives a typed fetch client:
 
 ```ts
-// 1. generate once (e.g. a script or codegen step)
+// 1. generate once — CLI or codegen step
+//    bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts
 import { generateClientTypes } from 'hono-forge';
 const src = generateClientTypes({
   controllers: [UserController],
@@ -1908,7 +1932,10 @@ bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without 
 bunx hono-forge routes ./src/app.module.ts           # route table for CI/debugging
 bunx hono-forge graph ./src/app.module.ts            # DI dependency graph
 bunx hono-forge doctor ./src/app.module.ts           # static wiring check — exit 1 on issues
+bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts  # typed client route map
 ```
+
+The `client` command writes a `routes.gen.ts` declaring `interface AppRoutes` — feed it to `createClient<AppRoutes>(baseUrl)` for a fully-typed fetch client. The generated file `import type`s your controllers from the entry file (so they must be exported there), or from `--import-path <module>`. Re-run it as a codegen step whenever routes change — type errors in callers surface immediately.
 
 `--export <name>` picks a specific export when the entry file exports several modules. TypeScript entry files require Bun (or a pre-built JS entry under plain Node).
 
