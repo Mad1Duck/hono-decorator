@@ -3,8 +3,10 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getClassMeta, METADATA_KEYS } from './decorators/metadata';
+import type { ScheduleMetadata } from './decorators/metadata';
 import { HonoRouteBuilder } from './core/route-builder';
 import { container } from './core/container';
+import { parseCron } from './core/cron';
 import { OpenAPIGenerator } from './openapi/generator';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
 
@@ -15,6 +17,7 @@ Usage:
   hono-forge openapi <entry-file> [options]   OpenAPI 3.1 spec → JSON file
   hono-forge routes  <entry-file> [options]   print the route table
   hono-forge graph   <entry-file> [options]   print the DI dependency graph
+  hono-forge doctor  <entry-file> [options]   static wiring check (CI guard)
 
 Options:
   --out <path>       flows: output dir (default ./flows)
@@ -96,7 +99,7 @@ function resolveTarget(mod: Record<string, unknown>, exportName?: string): Funct
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !args.command) { console.log(HELP); return; }
-  if (!['flows', 'openapi', 'routes', 'graph'].includes(args.command)) {
+  if (!['flows', 'openapi', 'routes', 'graph', 'doctor'].includes(args.command)) {
     fail(`Unknown command: '${args.command}'`);
   }
   if (!args.entry) fail(`Missing <entry-file> — e.g. hono-forge ${args.command} ./src/app.module.ts`);
@@ -131,6 +134,64 @@ async function main(): Promise<void> {
           : [t],
       );
     }
+    return;
+  }
+
+  if (args.command === 'doctor') {
+    const targets = (Array.isArray(target) ? target : [target]) as Function[];
+    const isModule = (t: Function) => getClassMeta(t, METADATA_KEYS.MODULE) !== undefined;
+    const controllers = targets.flatMap(t =>
+      isModule(t) ? (HonoRouteBuilder.moduleControllers(t) as Function[]) : [t]);
+    const providers = targets.flatMap(t =>
+      isModule(t) ? (HonoRouteBuilder.moduleProviders(t) as Function[]) : []);
+
+    const issues: string[] = [];
+
+    // 1. DI — dependencies absent from the module's providers/registrations.
+    for (const row of container.describe([...providers, ...controllers])) {
+      for (const dep of row.missing) {
+        issues.push(`di: '${row.name}' depends on '${dep}' — not in providers or container registrations; resolve() will fail`);
+      }
+    }
+
+    // 2. Route collisions — two handlers bound to the same method+path.
+    const seen = new Map<string, string>();
+    for (const ctrl of controllers) {
+      for (const d of HonoRouteBuilder.describe(ctrl as never)) {
+        const key = `${d.method.toUpperCase()} ${d.path}`;
+        const label = `${ctrl.name}.${d.handlerName}`;
+        const prev = seen.get(key);
+        if (prev) issues.push(`route: ${key} is bound by both ${prev} and ${label} — for exact matches the earlier handler wins`);
+        else seen.set(key, label);
+      }
+    }
+
+    // 3. Scheduler — invalid cron expressions and request-scoped jobs.
+    for (const cls of [...providers, ...controllers]) {
+      const sched = getClassMeta(cls, METADATA_KEYS.SCHEDULE) as Record<string, ScheduleMetadata> | undefined;
+      if (!sched) continue;
+      const requestScoped = getClassMeta(cls, METADATA_KEYS.REQUEST_SCOPED) !== undefined;
+      for (const [method, meta] of Object.entries(sched)) {
+        if (meta.cron) {
+          try {
+            parseCron(meta.cron);
+          } catch (err) {
+            issues.push(`cron: ${cls.name}.${method} — ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        if (requestScoped) {
+          issues.push(`schedule: ${cls.name}.${method} is on a @RequestScoped class — no request scope exists at tick time`);
+        }
+      }
+    }
+
+    if (issues.length === 0) {
+      console.log(`✔ no issues — ${controllers.length} controller(s), ${providers.length} provider(s)`);
+      return;
+    }
+    console.log(`✖ doctor found ${issues.length} issue(s):`);
+    for (const i of issues) console.log(`  • ${i}`);
+    process.exitCode = 1;
     return;
   }
 

@@ -11,12 +11,16 @@ import {
   HonoRouteBuilder,
   InMemoryChannelAdapter,
   Injectable,
+  Module,
+  mountDrain,
   mountHealth,
   mountMetrics,
   getMetricsRegistry,
+  getRequestDrain,
   OnWsMessage,
   Public,
   RateLimit,
+  registerLogger,
   Singleton,
   Throttle,
   WebSocket,
@@ -26,7 +30,6 @@ import {
   startScheduler,
 } from '../src';
 import type { ChannelClient, RedisRateLimitClient } from '../src';
-import type { WsLike } from '../src';
 
 const makeRequest = (path: string, init?: RequestInit): Request =>
   new Request(`http://test.local${path}`, init);
@@ -323,6 +326,98 @@ describe('@OnWsMessage', () => {
     } finally {
       HonoRouteBuilder.configure({ webSocketUpgrader: undefined });
     }
+  });
+});
+
+/* ================= REQUEST DRAIN ================= */
+
+describe('request drain', () => {
+  it('waits for in-flight requests and 503s new ones while draining', async () => {
+    const drain = getRequestDrain();
+    expect(drain.activeRequests).toBe(0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const app = new Hono();
+    mountDrain(app);
+    app.get('/slow', async (c) => { await gate; return c.text('done'); });
+
+    const pending = app.fetch(makeRequest('/slow'));
+    // give the request a tick to register
+    await new Promise((r) => setTimeout(r, 10));
+    expect(drain.activeRequests).toBe(1);
+
+    const drainPromise = drain.drain(5_000);
+    // new requests during drain → fast 503
+    const rejected = await app.fetch(makeRequest('/slow'));
+    expect(rejected.status).toBe(503);
+
+    release();
+    const res = await pending;
+    expect(await res.text()).toBe('done');
+    await drainPromise;
+    expect(drain.activeRequests).toBe(0);
+  });
+});
+
+/* ================= ROUTE COLLISION ================= */
+
+describe('route collision detection', () => {
+  it('warns when two controllers bind the same method+path', async () => {
+    const warnings: string[] = [];
+    registerLogger({
+      info: () => {},
+      warn: (_d, m) => { warnings.push(String(m ?? _d)); },
+      error: () => {},
+      debug: () => {},
+    } as never);
+    try {
+      @Controller('/x')
+      @Injectable()
+      class A {
+        @Get() @Public()
+        a() { return 'a'; }
+      }
+      @Controller('/x')
+      @Injectable()
+      class B {
+        @Get() @Public()
+        b() { return 'b'; }
+      }
+      @Module({ controllers: [A, B] })
+      class CollidingModule {}
+
+      HonoRouteBuilder.buildModule(CollidingModule);
+      expect(warnings.some((w) => w.includes('Duplicate route GET /x'))).toBe(true);
+    } finally {
+      registerLogger(console as never); // restore console-backed default
+    }
+  });
+});
+
+/* ================= CLI doctor ================= */
+
+describe('hono-forge doctor', () => {
+  it('reports issues and exits non-zero on a broken module', () => {
+    const proc = Bun.spawnSync(
+      [process.execPath, 'src/cli.ts', 'doctor', 'tests/fixtures/broken.module.ts'],
+      { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' }
+    );
+    const out = proc.stdout.toString();
+    expect(proc.exitCode).toBe(1);
+    expect(out).toContain("di:");
+    expect(out).toContain("route:");
+    expect(out).toContain("cron:");
+    expect(out).toContain("schedule:");
+  });
+
+  it('passes clean on the example module', () => {
+    const proc = Bun.spawnSync(
+      [process.execPath, 'src/cli.ts', 'doctor', 'examples/todo-api/index.ts'],
+      { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' }
+    );
+    expect(proc.exitCode).toBe(0);
+    expect(proc.stdout.toString()).toContain('no issues');
   });
 });
 

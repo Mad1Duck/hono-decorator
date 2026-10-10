@@ -1719,6 +1719,22 @@ during shutdown — SSE streams and WebSocket connections registered via
 an abrupt drop, and adapter resources (e.g. Redis pub/sub connections) are
 released.
 
+`drainRequests` (default `true` when a drain is mounted) waits for in-flight
+HTTP requests to finish — bounded by `timeoutMs` — while new requests get a
+fast `503`. Requires `mountDrain(app)` installed **before** routes so every
+request is counted; `createApp` mounts it automatically when `shutdown` is on.
+
+```ts
+const app = new Hono();
+mountDrain(app);                       // before buildModule/route()
+new HonoRouteBuilder(app).buildControllers(controllers);
+gracefulShutdown();                    // SIGTERM → drain → close → exit
+```
+
+> Long-lived streams aren't plain HTTP requests — `@Sse`/`@WebSocket` clients
+> not registered via `channels` still block the drain until `timeoutMs`. Use
+> `@ChannelRoute` so they're closed cleanly instead.
+
 ### Prometheus metrics — `mountMetrics`
 
 ```ts
@@ -1747,6 +1763,26 @@ HonoRouteBuilder.printRoutes(AppModule); // or a controller class
 ```
 
 Pure metadata read — nothing is instantiated. Great for verifying wiring at startup during development.
+
+Duplicate `method + path` bindings also warn at build time — two controllers
+claiming `GET /x` logs a `[hono-forge] Duplicate route` warning (the earlier
+handler wins for exact matches).
+
+### Static wiring check — `hono-forge doctor`
+
+CI-friendly validator over the same metadata — exits non-zero when the
+module is miswired, without booting the server:
+
+```bash
+bunx hono-forge doctor ./src/app.module.ts
+# ✖ doctor found 2 issue(s):
+#   • di: 'UserService' depends on 'Mailer' — not in providers or container registrations; resolve() will fail
+#   • route: GET /users is bound by both UserController.list and AdminController.list — …
+```
+
+Checks: missing DI deps (providers + controllers), route collisions across
+controllers, invalid `@Cron` expressions, and scheduled jobs on
+`@RequestScoped` classes.
 
 ### DI graph — `container.describe()` / `printGraph`
 
@@ -1838,6 +1874,8 @@ bunx hono-forge flows ./src/app.module.ts --out ./flows --base-url http://localh
 bunx hono-forge flows ./src/app.module.ts --single   # one file, a group per controller
 bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without a server
 bunx hono-forge routes ./src/app.module.ts           # route table for CI/debugging
+bunx hono-forge graph ./src/app.module.ts            # DI dependency graph
+bunx hono-forge doctor ./src/app.module.ts           # static wiring check — exit 1 on issues
 ```
 
 `--export <name>` picks a specific export when the entry file exports several modules. TypeScript entry files require Bun (or a pre-built JS entry under plain Node).

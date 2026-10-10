@@ -6,7 +6,7 @@ import { mountHealth } from './health';
 import type { HealthOptions } from './health';
 import { mountMetrics } from './metrics';
 import type { MetricsOptions } from './metrics';
-import { gracefulShutdown } from './shutdown';
+import { gracefulShutdown, mountDrain } from './shutdown';
 import type { GracefulShutdownOptions } from './shutdown';
 
 type Constructor = new (...args: unknown[]) => unknown;
@@ -57,6 +57,11 @@ export function createApp(ModuleClass: Function, options: CreateAppOptions = {})
   const app = new Hono();
   if (options.metrics) {
     mountMetrics(app, options.metrics === true ? {} : options.metrics);
+  }
+  // Track in-flight requests before routes so shutdown can drain them —
+  // disabled via shutdown: { drainRequests: false }.
+  if (options.shutdown && (options.shutdown === true || options.shutdown.drainRequests !== false)) {
+    mountDrain(app);
   }
   app.route('/', HonoRouteBuilder.buildModule(ModuleClass));
 

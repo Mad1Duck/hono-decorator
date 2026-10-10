@@ -9,6 +9,7 @@ import { defaultCacheAdapter } from './cache';
 import type { CacheAdapter } from './cache';
 import { HttpException } from './http-exception';
 import { inMemoryRateLimiter } from './rate-limit';
+import { getLogger } from './logger';
 import { createRequestContext, runInRequestContext } from './request-context';
 import { METADATA_KEYS } from '../decorators/metadata';
 import { extractIp, detectDevice, extractUserAgent } from '../utils/request';
@@ -173,7 +174,9 @@ export class HonoRouteBuilder {
   static build<T>(
     ControllerClass: ControllerConstructor<T>,
     platform?: 'mobile' | 'web',
-    options?: { excludePrivate?: boolean; }
+    options?: { excludePrivate?: boolean; },
+    /** @internal shared across controllers when called via buildModule. */
+    seenRoutes?: Set<string>
   ): Hono {
     const app = new Hono();
 
@@ -225,8 +228,9 @@ export class HonoRouteBuilder {
       return route.platform === 'all' || route.platform === platform;
     });
 
+    const routeRegistry = seenRoutes ?? new Set<string>();
     for (const route of platformRoutes) {
-      this.registerRoute(app, route, getController, controllerMetadata.basePath, meta);
+      this.registerRoute(app, route, getController, controllerMetadata.basePath, meta, routeRegistry);
     }
 
     return app;
@@ -343,6 +347,7 @@ export class HonoRouteBuilder {
     }
 
     const app = new Hono();
+    const seenRoutes = new Set<string>();
     for (const ctrl of controllers) {
       const cls = ctrl as ControllerConstructor;
       if (!classMeta(cls as unknown as Function)?.[METADATA_KEYS.CONTROLLER]) {
@@ -351,7 +356,7 @@ export class HonoRouteBuilder {
           `'${ModuleClass.name}' is not decorated with @Controller.`
         );
       }
-      app.route('/', this.build(cls, platform, options));
+      app.route('/', this.build(cls, platform, options, seenRoutes));
     }
     return app;
   }
@@ -402,7 +407,8 @@ export class HonoRouteBuilder {
     route: RouteMetadata,
     getController: () => ControllerInstance,
     basePath: string,
-    meta: ClassMeta | null
+    meta: ClassMeta | null,
+    seenRoutes?: Set<string>
   ): void {
     const { method, path, handlerName } = route;
     const onError = this.config.onError;
@@ -559,8 +565,19 @@ export class HonoRouteBuilder {
     const fullPathNoSlash = fullPath.endsWith('/') ? fullPath.slice(0, -1) || '/' : fullPath;
 
     type HonoWithOn = { on(method: string, path: string, ...handlers: HonoMiddlewareFn[]): Hono; };
-    const register = (routePath: string) => (m: string, ...handlers: HonoMiddlewareFn[]) =>
-      (app as unknown as HonoWithOn).on(m.toUpperCase(), routePath, ...handlers);
+    const register = (routePath: string) => (m: string, ...handlers: HonoMiddlewareFn[]) => {
+      if (seenRoutes) {
+        const key = `${m.toUpperCase()} ${routePath}`;
+        if (seenRoutes.has(key)) {
+          getLogger().warn?.(
+            { route: key, handler: handlerName },
+            `[hono-forge] Duplicate route ${key} — for exact matches the earlier handler wins`
+          );
+        }
+        seenRoutes.add(key);
+      }
+      return (app as unknown as HonoWithOn).on(m.toUpperCase(), routePath, ...handlers);
+    };
 
     const requestLogger = this.config.requestLogger;
     const onRequestStart = this.config.onRequestStart;

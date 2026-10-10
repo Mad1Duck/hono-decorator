@@ -21,7 +21,7 @@ export { createClient, generateClientTypes, ClientRequestError } from './client'
 export type { ForgeClient, ClientRequestInit, GenerateClientTypesOptions, RouteMap } from './client';
 export { mountHealth } from './health';
 export type { HealthCheck, HealthCheckResult, HealthOptions } from './health';
-export { gracefulShutdown } from './shutdown';
+export { gracefulShutdown, mountDrain, getRequestDrain, RequestDrain } from './shutdown';
 export type { GracefulShutdownOptions } from './shutdown';
 export { mountMetrics, getMetricsRegistry, MetricsRegistry } from './metrics';
 export type { MetricsOptions } from './metrics';
