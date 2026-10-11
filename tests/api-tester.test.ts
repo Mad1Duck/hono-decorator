@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 import {
   ApiBody,
+  ApiQuery,
+  ApiResponse,
   Controller,
   Delete,
   Get,
@@ -68,6 +70,22 @@ class DocsController {
 
   @Post('/ping') @Public()
   ping() { return {}; }
+}
+
+@Controller('/uploads')
+class UploadController {
+  @Post('/files/:folderId') @Public()
+  @Validate({ params: z.object({ folderId: z.string().uuid() }) })
+  @ApiQuery('notify', z.boolean(), { required: true })
+  @ApiQuery('tags', z.string())
+  @ApiBody(z.object({ file: z.file(), caption: z.string() }))
+  @ApiResponse(201, 'created', z.object({ id: z.string(), url: z.string() }))
+  upload() { return {}; }
+
+  @Get('/search') @Public()
+  @ApiQuery('q', z.string(), { required: true })
+  @ApiQuery('limit', z.number())
+  search() { return []; }
 }
 
 describe('generateFlowFiles', () => {
@@ -182,6 +200,41 @@ describe('generateFlowFiles — body detection without @Validate', () => {
   test('GET routes still carry no body config', () => {
     const get = file.nodes.find((n) => n.label.startsWith('GET'));
     expect(get).toBeUndefined(); // DocsController has no GET — sanity
+  });
+});
+
+describe('generateFlowFiles — metadata completeness', () => {
+  const [result] = generateFlowFiles(UploadController);
+  const file = result!.file;
+  const upload = file.nodes.find((n) => n.label.includes('/files'))!
+    .config as ApiTesterRestConfig;
+  const search = file.nodes.find((n) => n.label.includes('/search'))!
+    .config as ApiTesterRestConfig;
+
+  test('@ApiQuery becomes query rows — required enabled, optional disabled', () => {
+    expect(search.query).toContainEqual({ key: 'q', value: 'string', enabled: true });
+    expect(search.query).toContainEqual({ key: 'limit', value: '42', enabled: false });
+  });
+
+  test('z.file() body becomes form-data with a file row', () => {
+    expect(upload.bodyMode).toBe('form-data');
+    expect(upload.formData).toContainEqual({ key: 'file', value: '', enabled: true, type: 'file' });
+    expect(upload.formData).toContainEqual({ key: 'caption', value: 'string', enabled: true });
+    // multipart boundary is set by api-tester — no manual Content-Type
+    expect(upload.headers.find((h) => h.key === 'Content-Type')).toBeUndefined();
+  });
+
+  test('typed path params seed the editable variable default', () => {
+    expect(upload.pathParams).toContainEqual({ key: 'folderId', value: '{{folderId}}', enabled: true });
+    const folderVar = file.settings?.defaultVariables?.find((v) => v.key === 'folderId');
+    expect(folderVar?.value).toBe('3fa85f64-5717-4562-b3fc-2c963f66afa6');
+    expect(folderVar?.enabled).toBe(true);
+  });
+
+  test('@ApiResponse 2xx drives the status assertion and shape checks', () => {
+    expect(upload.assertions).toContainEqual({ path: '$status', operator: 'equals', expected: '201' });
+    expect(upload.assertions).toContainEqual({ path: '$.id', operator: 'exists', forStatus: 201 });
+    expect(upload.assertions).toContainEqual({ path: '$.url', operator: 'exists', forStatus: 201 });
   });
 });
 

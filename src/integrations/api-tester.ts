@@ -41,6 +41,9 @@ export interface FlowKeyValue {
   key: string;
   value: string;
   enabled: boolean;
+  /** 'file' rows treat `value` as a file path (api-tester multipart upload). */
+  type?: 'text' | 'file';
+  fileName?: string;
 }
 
 export interface FlowExtractor {
@@ -66,6 +69,8 @@ export interface ApiTesterRestConfig {
   pathParams?: FlowKeyValue[];
   bodyMode?: 'none' | 'raw' | 'form-data' | 'x-www-form-urlencoded';
   body?: string;
+  /** used when bodyMode is 'form-data' or 'x-www-form-urlencoded' */
+  formData?: FlowKeyValue[];
   extractors: FlowExtractor[];
   assertions: FlowAssertion[];
 }
@@ -286,13 +291,28 @@ function routeOrder(d: RouteDescription): number {
   }
 }
 
+/** Expected success status: explicit @Status, else the lowest documented 2xx
+ *  from @ApiResponse, else the conventional default for the method. */
+function expectedStatus(
+  route: RouteDescription,
+  statusByHandler: Record<string, ResponseStatusMetadata>,
+  openApi?: OpenAPIMetadata,
+): number {
+  const declared = statusByHandler[route.handlerName]?.status;
+  if (declared) return declared;
+  const documented = Object.keys(openApi?.responses ?? {})
+    .map(Number)
+    .filter((n) => n >= 200 && n < 300)
+    .sort((a, b) => a - b)[0];
+  return documented ?? (route.method === 'delete' ? 204 : 200);
+}
+
 function statusAssertion(
   route: RouteDescription,
   statusByHandler: Record<string, ResponseStatusMetadata>,
+  openApi?: OpenAPIMetadata,
 ): FlowAssertion[] {
-  const expected = statusByHandler[route.handlerName]?.status
-    ?? (route.method === 'delete' ? 204 : 200);
-  return [{ path: '$status', operator: 'equals', expected: String(expected) }];
+  return [{ path: '$status', operator: 'equals', expected: String(expectedStatus(route, statusByHandler, openApi)) }];
 }
 
 const MAX_SHAPE_ASSERTIONS = 8;
@@ -317,14 +337,15 @@ function responseShapeAssertions(
   route: RouteDescription,
   statusByHandler: Record<string, ResponseStatusMetadata>,
   serializeMap: Record<string, ZodType>,
+  openApi?: OpenAPIMetadata,
 ): FlowAssertion[] {
-  const zod = serializeMap[route.handlerName] ?? serializeMap['*'];
+  const forStatus = expectedStatus(route, statusByHandler, openApi);
+  // @Serialize/@ValidateResult first; @ApiResponse(2xx, schema) as fallback.
+  const zod = serializeMap[route.handlerName] ?? serializeMap['*']
+    ?? openApi?.responses?.[forStatus]?.schema;
   if (!zod) return [];
   try {
     const js = zodToJsonSchema(zod) as Record<string, unknown>;
-    const forStatus =
-      statusByHandler[route.handlerName]?.status ??
-      (route.method === 'delete' ? 204 : 200);
     const paths =
       js.type === 'array'
         ? shapePaths((js.items ?? {}) as Record<string, unknown>, '$[0].')
@@ -335,12 +356,60 @@ function responseShapeAssertions(
   }
 }
 
+/** JSON-schema file field — `z.file()` serialises to format/contentEncoding 'binary'. */
+function isBinarySchema(js: Record<string, unknown>): boolean {
+  return js.format === 'binary' || js.contentEncoding === 'binary';
+}
+
+/**
+ * Request body → api-tester body config. Schemas with a top-level file field
+ * (`z.file()`) become `form-data` rows — file fields get `type: 'file'` rows,
+ * the rest get example values. Plain schemas become a raw JSON example;
+ * schemas zod can't serialise (e.g. z.instanceof(File)) fall back to an
+ * empty raw body the user can fill in.
+ */
+function bodyParts(
+  bodySchema: ZodType,
+): Pick<ApiTesterRestConfig, 'bodyMode' | 'body' | 'formData'> & { headers: FlowKeyValue[] } {
+  try {
+    const js = zodToJsonSchema(bodySchema) as Record<string, unknown>;
+    const props = (js.properties ?? {}) as Record<string, Record<string, unknown>>;
+    const entries = Object.entries(props);
+    if (entries.length && entries.some(([, v]) => isBinarySchema(v))) {
+      // multipart — api-tester sets the boundary Content-Type itself
+      return {
+        bodyMode: 'form-data',
+        headers: [],
+        formData: entries.map(([k, v]) =>
+          isBinarySchema(v)
+            ? { key: k, value: '', enabled: true, type: 'file' as const }
+            : kv(k, String(jsonSchemaToExample(v, k)))),
+      };
+    }
+    return {
+      bodyMode: 'raw',
+      headers: [kv('Content-Type', 'application/json')],
+      body: JSON.stringify(jsonSchemaToExample(js)),
+    };
+  } catch {
+    return {
+      bodyMode: 'raw',
+      headers: [kv('Content-Type', 'application/json')],
+      body: '',
+    };
+  }
+}
+
 /* ================= GENERATOR ================= */
 
 interface BuiltControllerNodes {
   nodes: ApiTesterFlowNode[];
   edges: ApiTesterFlowEdge[];
   usedVars: Set<string>;
+  /** Seed values for `{{var}}` references — e.g. path params with a
+   *  @Validate({params}) schema get a schema-derived example as the editable
+   *  variable default instead of a blank. */
+  varSeeds: Record<string, string>;
 }
 
 /** Build the node chain for one controller — CRUD-ordered, linearly edged. */
@@ -368,6 +437,7 @@ function buildControllerNodes(
   );
 
   const usedVars = new Set<string>();
+  const varSeeds: Record<string, string> = {};
   const nodes: ApiTesterFlowNode[] = [];
   const edges: ApiTesterFlowEdge[] = [];
 
@@ -381,6 +451,7 @@ function buildControllerNodes(
 
   for (const route of routes) {
     const validation = validationMap[route.handlerName];
+    const openapi = openapiMap[route.handlerName];
     const paramNames = pathParamNames(route.path);
     const headers: FlowKeyValue[] = [];
     const extractors: FlowExtractor[] = [];
@@ -393,6 +464,14 @@ function buildControllerNodes(
 
     const pathParams = paramNames.map(p => {
       usedVars.add(p);
+      // @Validate({params}) documents each param's schema — seed the editable
+      // variable with a schema-derived example so the flow runs out of the box.
+      const paramSchema = openapi?.params?.[p]?.schema;
+      if (paramSchema && varSeeds[p] === undefined) {
+        try {
+          varSeeds[p] = String(jsonSchemaToExample(zodToJsonSchema(paramSchema), p));
+        } catch { /* leave unseeded */ }
+      }
       return kv(p, `{{${p}}}`);
     });
 
@@ -414,7 +493,7 @@ function buildControllerNodes(
         headers,
         listenDurationMs,
         extractors,
-        assertions: statusAssertion(route, statusMap),
+        assertions: statusAssertion(route, statusMap, openapi),
       } satisfies ApiTesterSseConfig;
     } else if (route.websocket || route.channelRoute) {
       config = {
@@ -436,6 +515,17 @@ function buildControllerNodes(
           query.push(kv(k, String(jsonSchemaToExample(v, k)), false));
         }
       }
+      // @ApiQuery fallback for params the validation schema doesn't cover —
+      // required ones enabled, optional ones as disabled placeholders.
+      for (const [name, meta] of Object.entries(openapi?.query ?? {})) {
+        if (query.some((q) => q.key === name)) continue;
+        try {
+          const js = zodToJsonSchema(meta.schema);
+          query.push(kv(name, String(jsonSchemaToExample(js, name)), meta.required === true));
+        } catch {
+          query.push(kv(name, '', false));
+        }
+      }
       const rest: ApiTesterRestConfig = {
         type: 'rest',
         method,
@@ -444,23 +534,28 @@ function buildControllerNodes(
         query,
         pathParams: pathParams.length ? pathParams : undefined,
         extractors,
-        assertions: statusAssertion(route, statusMap),
+        assertions: statusAssertion(route, statusMap, openapi),
       };
       if (method !== 'GET' && method !== 'DELETE') {
         // @Validate({body}) is the primary source; @ApiBody(schema) documents
         // the same shape for routes that validate inside the handler instead.
-        const bodySchema = validation?.body ?? openapiMap[route.handlerName]?.body?.schema;
-        rest.bodyMode = 'raw';
-        headers.push(kv('Content-Type', 'application/json'));
-        // Schema-less mutation — leave the raw editor empty-but-visible so the
-        // user sees a body field exists (an empty string sends no body, so this
-        // is safe even for endpoints that take none).
-        rest.body = bodySchema
-          ? JSON.stringify(jsonSchemaToExample(zodToJsonSchema(bodySchema)), null, 2)
-          : '';
+        const bodySchema = validation?.body ?? openapi?.body?.schema;
+        if (bodySchema) {
+          const parts = bodyParts(bodySchema);
+          rest.bodyMode = parts.bodyMode;
+          rest.body = parts.body;
+          rest.formData = parts.formData;
+          headers.push(...parts.headers);
+        } else {
+          // Schema-less mutation — leave the raw editor empty-but-visible so
+          // the user sees a body field exists (an empty string sends no body).
+          rest.bodyMode = 'raw';
+          rest.body = '';
+          headers.push(kv('Content-Type', 'application/json'));
+        }
       }
       rest.assertions.push(...assertions);
-      rest.assertions.push(...responseShapeAssertions(route, statusMap, serializeMap));
+      rest.assertions.push(...responseShapeAssertions(route, statusMap, serializeMap, openapi));
       config = rest;
     }
 
@@ -477,7 +572,7 @@ function buildControllerNodes(
     }
   }
 
-  return { nodes, edges, usedVars };
+  return { nodes, edges, usedVars, varSeeds };
 }
 
 function resolveControllers(target: Function | Function[]): Function[] {
@@ -498,12 +593,14 @@ function flowSettings(
   variables: FlowKeyValue[],
   usedVars: Set<string>,
   produced: Set<string>,
+  varSeeds: Record<string, string>,
 ): ApiTesterFlowFile['settings'] {
   // Any {{var}} used but never produced by an extractor → editable default variable.
+  // Schema-seeded vars (e.g. typed path params) come pre-filled and enabled.
   const defaultVariables = [...variables];
   for (const v of usedVars) {
     if (!produced.has(v) && !defaultVariables.some(d => d.key === v)) {
-      defaultVariables.push(kv(v, '', false));
+      defaultVariables.push(kv(v, varSeeds[v] ?? '', varSeeds[v] !== undefined));
     }
   }
   return { baseUrl, ...(defaultVariables.length ? { defaultVariables } : {}) };
@@ -522,7 +619,7 @@ export function generateFlowFiles(
   const wsBase = baseUrl.replace(/^http/, 'ws');
 
   return resolveControllers(target).map(ControllerClass => {
-    const { nodes, edges, usedVars } = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs, auth });
+    const { nodes, edges, usedVars, varSeeds } = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs, auth });
     const produced = new Set(nodes.flatMap(n => n.config.extractors.map(e => e.variableName)));
     const name = ControllerClass.name.replace(/Controller$/, '') || ControllerClass.name;
     return {
@@ -535,7 +632,7 @@ export function generateFlowFiles(
         nodes,
         edges,
         tags: ['generated', 'hono-forge'],
-        settings: flowSettings(baseUrl, variables, usedVars, produced),
+        settings: flowSettings(baseUrl, variables, usedVars, produced, varSeeds),
       },
     };
   });
@@ -557,6 +654,7 @@ export function generateFlowFile(
   const edges: ApiTesterFlowEdge[] = [];
   const groups: ApiTesterFlowGroup[] = [];
   const usedVars = new Set<string>();
+  const varSeeds: Record<string, string> = {};
   const produced = new Set<string>();
 
   // Single-file auth preamble — one ungrouped login node that every
@@ -597,6 +695,7 @@ export function generateFlowFile(
     }
     edges.push(...built.edges);
     for (const v of built.usedVars) usedVars.add(v);
+    Object.assign(varSeeds, built.varSeeds);
   });
 
   const targetName = Array.isArray(target)
@@ -613,7 +712,7 @@ export function generateFlowFile(
       edges,
       groups: groups.length ? groups : undefined,
       tags: ['generated', 'hono-forge'],
-      settings: flowSettings(baseUrl, variables, usedVars, produced),
+      settings: flowSettings(baseUrl, variables, usedVars, produced, varSeeds),
     },
   };
 }
