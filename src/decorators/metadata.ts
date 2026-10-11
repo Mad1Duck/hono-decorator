@@ -50,6 +50,7 @@ export const METADATA_KEYS = {
   SECURITY: Symbol.for('hono-forge.security'),
   SECURITY_SCHEMES: Symbol.for('hono-forge.securitySchemes'),
   CHANNEL_ROUTE: Symbol.for('hono-forge.channelRoute'),
+  CHANNEL_AUTH: Symbol.for('hono-forge.channelAuth'),
   IS_PUBLIC: Symbol.for('hono-forge.isPublic'),
   IS_PRIVATE: Symbol.for('hono-forge.isPrivate'),
   CATCH: Symbol.for('hono-forge.catch'),
@@ -158,12 +159,33 @@ export interface CacheMetadata {
 /** Channel pattern for @ChannelRoute — static or resolved per request. */
 export type ChannelRouteMetadata = string | ((c: Context) => string);
 
+/** @ChannelAuth — authorize the resolved channel before subscribing.
+ *  Return false to reject with 403 before the SSE stream opens / the WS
+ *  upgrade completes. Throw an HttpException for a custom status/body. */
+export type ChannelAuthorizeFn = (c: Context, channel: string) => boolean | Promise<boolean>;
+
 /* ================= RESPONSE DECORATORS ================= */
 
 /** @Idempotent metadata — replay responses for a repeated Idempotency-Key. */
 export interface IdempotentMetadata {
   /** How long the stored response is replayable. Default 24h. */
   ttl?: number;
+  /**
+   * Namespace the idempotency key — e.g. `(c) => c.get('user').tenantId`.
+   * REQUIRED for multi-tenant apps: without it a key sent by tenant A can
+   * replay a stored response produced by tenant B on the same endpoint.
+   * Return value is prepended to the internal cache key.
+   */
+  scope?: (c: Context) => string;
+  /**
+   * Hash-check the request body (default true). When the same
+   * `Idempotency-Key` arrives with a *different* body, the request is
+   * rejected `409 IDEMPOTENCY_CONFLICT` instead of silently replaying the
+   * stored response — the industry-standard behavior (Stripe et al).
+   * Set `false` only if your clients intentionally reuse keys across
+   * differing payloads.
+   */
+  hash?: boolean;
 }
 
 /** @Header metadata — static response headers per method. */

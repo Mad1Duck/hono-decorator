@@ -289,6 +289,11 @@ export class Container {
       ...this.getRegisteredTokens(),
     ]);
 
+    /** A token resolvable at runtime without an explicit provider listing —
+     *  @Injectable() classes self-instantiate via constructor injection. */
+    const isSelfProviding = (token: InjectionToken): boolean =>
+      typeof token === 'function' && classMeta(token)?.[METADATA_KEYS.INJECTABLE] === true;
+
     const describeToken = (token: InjectionToken): ProviderDescription => {
       const meta = typeof token === 'function' ? classMeta(token) : null;
       const deps = typeof token === 'function' ? this.getInjectTokens(token as ConcreteConstructor) : [];
@@ -301,19 +306,31 @@ export class Container {
         name: this.getTokenName(token),
         scope,
         dependencies: deps.map(d => this.getTokenName(d)),
-        missing: deps.filter(d => !known.has(d)).map(d => this.getTokenName(d)),
+        // only flag deps that genuinely can't resolve: unregistered
+        // symbol/string tokens and undecorated classes used as tokens
+        missing: deps
+          .filter(d => !known.has(d) && !isSelfProviding(d))
+          .map(d => this.getTokenName(d)),
         registered: this.factories.has(token) ? 'factory'
           : this.singletons.has(token) ? 'instance' : 'class',
         resolved: this.singletons.has(token),
       };
     };
 
+    // BFS through self-providing injectable deps so their own wiring is
+    // checked too — e.g. OrdersRepository → DBService → Config.
+    const queue = [...targets as InjectionToken[], ...this.getRegisteredTokens()];
     const described = new Set<InjectionToken>();
     const out: ProviderDescription[] = [];
-    for (const token of [...targets as InjectionToken[], ...this.getRegisteredTokens()]) {
+    for (let i = 0; i < queue.length; i++) {
+      const token = queue[i]!;
       if (described.has(token)) continue;
       described.add(token);
       out.push(describeToken(token));
+      const deps = typeof token === 'function' ? this.getInjectTokens(token as ConcreteConstructor) : [];
+      for (const d of deps) {
+        if (isSelfProviding(d) && !described.has(d) && !known.has(d)) queue.push(d);
+      }
     }
     return out;
   }

@@ -507,6 +507,47 @@ describe('Container.describe / printGraph', () => {
     expect(rows.find(r => r.name === 'Repo')!.missing).toEqual([]);
   });
 
+  it('treats @Injectable deps as self-providing — not missing (doctor fix)', () => {
+    const c = new Container();
+
+    @Injectable()
+    class DBService {}
+    @Injectable([DBService])
+    class OrdersRepository {}
+    @Injectable([class UndecoratedDep {}])
+    class NeedsUndecorated {}
+    @Injectable(['CONFIG_TOKEN'])
+    class NeedsSymbol {}
+
+    const rows = c.describe([OrdersRepository, NeedsUndecorated, NeedsSymbol]);
+    const byName = new Map(rows.map(r => [r.name, r]));
+
+    // decorated dep resolves at runtime → not flagged; also traversed into the graph
+    expect(byName.get('OrdersRepository')!.missing).toEqual([]);
+    expect(byName.has('DBService')).toBe(true);
+
+    // undecorated class token → still flagged
+    expect(byName.get('NeedsUndecorated')!.missing).toEqual(['UndecoratedDep']);
+
+    // unregistered string/symbol token → still flagged
+    expect(byName.get('NeedsSymbol')!.missing).toEqual(['CONFIG_TOKEN']);
+  });
+
+  it('traverses injectable deps transitively — their own missing deps surface', () => {
+    const c = new Container();
+
+    @Injectable([class Ghost {}])
+    class Inner {}
+    @Injectable([Inner])
+    class Outer {}
+
+    const rows = c.describe([Outer]);
+    const byName = new Map(rows.map(r => [r.name, r]));
+
+    expect(byName.get('Outer')!.missing).toEqual([]);
+    expect(byName.get('Inner')!.missing).toEqual(['Ghost']);
+  });
+
   it('printGraph warns about missing deps', () => {
     const c = new Container();
     const logs: string[] = [];

@@ -1031,6 +1031,44 @@ class MeController {
 
 `@JwtAuth` is reflected in the generated OpenAPI spec — the route gets `security: [{ bearerAuth: [] }]`, `401`/`403` responses, and a `bearerAuth` HTTP security scheme in `components` (so Scalar's **Authorize** button works). `@Public` still opts a route out. The same applies to `@RequireAuth` / `@RequireRole` / permission guards.
 
+### Execution order
+
+Where each decorator fires in a request — outermost first:
+
+```
+request
+ │
+ ├─ class-level middleware        @Middleware / @Use / @Cors / @SecureHeaders / @JwtAuth
+ ├─ method-level middleware       @Middleware / @Use on the handler
+ ├─ @RateLimit                    ← 429 short-circuit
+ ├─ guards                        @RequireAuth / @RequireRole / @UseGuards → guardExecutor
+ ├─ @Validate                     ← body/query/params parsed → VALIDATED_* / Body(c) / Query(c)
+ ├─ @ChannelAuth                  ← SSE/WS only: channel authorized before subscribe
+ │
+ ├─ handler entry
+ │   ├─ @Redirect                 ← returns immediately, handler never runs
+ │   ├─ @Header / @CacheControl / @ApiDeprecated response headers
+ │   ├─ @Idempotent               ← replay check (cache hit skips everything below)
+ │   ├─ @Cache                    ← hit returns cached value
+ │   ├─ @SingleFlight             ← concurrent dupes share one execution
+ │   ├─ @Concurrency              ← 503 when saturated
+ │   └─ your handler
+ │
+ └─ on the way out
+     ├─ @Serialize                ← response validated/transformed by Zod
+     ├─ @Cache / @Idempotent      ← result stored
+     ├─ @CacheInvalidate          ← patterns purged
+     ├─ @ETag / @Status / @NoContent
+     └─ exception filters         ← method-level first, then class-level
+```
+
+Key points:
+
+- **Class middleware before method middleware, both before guards.** `@JwtAuth` at class level runs before a method-level `@Middleware` — so `User(c)` is populated in method middleware.
+- **Guards run after all middleware** — a middleware can't depend on guard side-effects, but a guard can read what middleware set on `c`.
+- **`@Throttle` is not middleware** — it wraps the handler *invocation*, keyed on the controller instance (see below), so it sits at the handler step, not in the chain above.
+- **`@Idempotent`'s replay check happens before `@Cache`** — a replayed idempotent response never touches the cache layer.
+
 ---
 
 ## SSE (Server-Sent Events)
@@ -1213,6 +1251,54 @@ chat(c: Context) {
   return { onMessage: (e, ws) => { /* still works — bridge wraps onOpen/onClose */ } };
 }
 ```
+
+### `@ChannelAuth` — authorize before subscribing
+
+Channel subscription is not automatically authorized — any client that reaches the route joins the channel. Add `@ChannelAuth` to run an authorization check on the **resolved** channel before the stream opens / the upgrade completes; denying returns `403` and the client is never subscribed (no connect-then-close).
+
+```ts
+@WebSocket('/kds/:outletId/:station')
+@ChannelRoute((c) => `outlet:${Param(c, 'outletId')}:kds:${Param(c, 'station')}`)
+@ChannelAuth((c, channel) => {
+  const user = User<{ outletIds: string[] }>(c);
+  return !!user?.outletIds?.includes(Param(c, 'outletId'));
+})
+kds(c: Context) { return {}; }
+```
+
+The callback also receives the resolved `channel` string for logging or fine-grained checks, and can be `async`. Throw an `HttpException` for a custom status/body; returning `false` → `403 CHANNEL_FORBIDDEN`. Runs after guards/middleware — `User(c)` is populated.
+
+### WS auth recipe — token via `?token=`
+
+Browsers can't set headers on `new WebSocket(url)` — the standard pattern is a token in the query string, validated by a middleware that runs **before** the upgrade. `@JwtAuth` works as-is because middleware runs on the upgrade request:
+
+```ts
+import { Middleware } from 'hono-forge';
+import { verify } from 'hono/jwt';
+
+// Verify ?token= before the upgrade — sets 'user' exactly like @JwtAuth.
+const wsQueryAuth = async (c: Context, next: Next) => {
+  const token = c.req.query('token') ?? c.req.header('authorization')?.replace(/^Bearer /, '');
+  if (!token) return c.json({ error: 'Unauthorized' }, 401);
+  try {
+    c.set('user', await verify(token, process.env.JWT_SECRET!));
+  } catch {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  await next();
+};
+
+@Controller('/ws')
+class KdsController {
+  @WebSocket('/kds/:outletId')
+  @Middleware(wsQueryAuth)                                        // 401 before upgrade
+  @ChannelRoute((c) => `outlet:${Param(c, 'outletId')}:kds`)
+  @ChannelAuth((c) => User(c)?.outletIds?.includes(Param(c, 'outletId')) ?? false) // 403
+  kds(c: Context) { return {}; }
+}
+```
+
+Request rejected before upgrade (`401` from `wsQueryAuth`, `403` from `@ChannelAuth`) — the socket never opens for an unauthorized client.
 
 ---
 
@@ -1482,6 +1568,18 @@ Safe retries for mutations: when the client sends an `Idempotency-Key` header, t
 @Idempotent({ ttl: 86_400_000 }) // optional — default 24h
 createOrder(c: Context) { /* runs at most once per key */ }
 ```
+
+**Body-hash check (default on).** A repeat of the same key with a *different* request body is rejected `409 IDEMPOTENCY_CONFLICT` — the industry-standard behavior (Stripe et al). A silent replay would mean the client believes a payload that was never processed succeeded. Opt out with `{ hash: false }` only if clients intentionally reuse keys across differing payloads.
+
+**Multi-tenant safety — always pass `scope`.** Without it the key namespace is global to the endpoint: tenant A's `Idempotency-Key` can replay tenant B's stored response. Scope namespaces the key — e.g. by tenant + outlet:
+
+```ts
+@Post('/orders')
+@Idempotent({ scope: (c) => `${User(c)?.tenantId}:${c.req.query('outletId')}` })
+createOrder(c: Context) { /* keys are scoped per tenant+outlet */ }
+```
+
+> ⚠ **The default store is in-memory per process.** Stored responses are lost on restart and not shared across replicas — for production idempotency configure a durable `cacheAdapter` (e.g. Redis).
 
 ### `@SingleFlight`
 

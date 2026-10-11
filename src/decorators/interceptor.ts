@@ -48,9 +48,21 @@ export function CacheInvalidate(...patterns: string[]): (value: Function, contex
  * `ttl` ms (default 24h). Response headers `set-cookie`/`content-length` are
  * not replayed.
  *
+ * Body-hash check (default on): a repeat of the same key with a *different*
+ * request body is rejected `409 IDEMPOTENCY_CONFLICT` — opt out with
+ * `{ hash: false }`.
+ *
+ * Multi-tenant apps MUST pass `scope` — without it the key namespace is
+ * global to the endpoint, so one tenant's key can replay another tenant's
+ * stored response:
+ *
  * @example
- * @Post() @Idempotent()
+ * @Post() @Idempotent({ scope: (c) => String(c.get('user')?.tenantId ?? 'anon') })
  * createOrder(c: Context) { ... }
+ *
+ * ⚠ The default cache store is **in-memory per process** — stored responses
+ * are lost on restart and not shared across replicas. For production
+ * idempotency configure a durable {@link CacheAdapter} (e.g. Redis).
  */
 export function Idempotent(options: IdempotentMetadata = {}): (value: Function, context: ClassMethodDecoratorContext) => void {
   return (_value, context) => {

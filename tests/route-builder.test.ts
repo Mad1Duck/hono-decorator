@@ -38,6 +38,7 @@ import {
   getTraceId,
   HttpException,
   ChannelRoute,
+  ChannelAuth,
   JwtAuth,
   Module,
   User,
@@ -1304,6 +1305,65 @@ describe('@ChannelRoute', () => {
     HonoRouteBuilder.configure({});
     channels.use(new InMemoryChannelAdapter());
   });
+
+  it('@ChannelAuth denies before subscribe — SSE gets a 403, never subscribed', async () => {
+    const adapter = new InMemoryChannelAdapter();
+    channels.use(adapter);
+
+    @Controller('/chanauth')
+    class C {
+      @Sse('/feed') @Public()
+      @ChannelRoute((c) => `tenant:${c.req.header('x-tenant')}`)
+      @ChannelAuth((c, _channel) => c.req.header('x-tenant') === 'allowed')
+      feed() { }
+    }
+    const app = HonoRouteBuilder.build(C);
+
+    const denied = await app.fetch(makeRequest('/chanauth/feed', { headers: { 'x-tenant': 'other' } }));
+    expect(denied.status).toBe(403);
+    expect(adapter.subscriberCount('tenant:other')).toBe(0);
+
+    const ok = await app.fetch(makeRequest('/chanauth/feed', { headers: { 'x-tenant': 'allowed' } }));
+    expect(ok.status).toBe(200);
+    for (let i = 0; i < 50 && adapter.subscriberCount('tenant:allowed') === 0; i++) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    expect(adapter.subscriberCount('tenant:allowed')).toBe(1);
+    await ok.body!.cancel();
+
+    channels.use(new InMemoryChannelAdapter());
+  });
+
+  it('@ChannelAuth denies WebSocket before the upgrade completes', async () => {
+    channels.use(new InMemoryChannelAdapter());
+    let captured: unknown;
+    HonoRouteBuilder.configure({
+      webSocketUpgrader: (factory) => async (c: Context) => {
+        captured = await factory(c);
+        return c.text('upgraded');
+      },
+    });
+
+    @Controller('/wsauth')
+    class C {
+      @WebSocket('/room') @Public()
+      @ChannelRoute('room:secure')
+      @ChannelAuth((c) => c.req.query('token') === 'good')
+      chat() { return {}; }
+    }
+    const app = HonoRouteBuilder.build(C);
+
+    const denied = await app.fetch(makeRequest('/wsauth/room?token=bad'));
+    expect(denied.status).toBe(403);
+    expect(captured).toBeUndefined();
+
+    const ok = await app.fetch(makeRequest('/wsauth/room?token=good'));
+    expect(ok.status).toBe(200);
+    expect(captured).toBeDefined();
+
+    HonoRouteBuilder.configure({});
+    channels.use(new InMemoryChannelAdapter());
+  });
 });
 
 /* -------- @JwtAuth -------- */
@@ -1474,6 +1534,85 @@ describe('Response decorators & turnkey features', () => {
     expect(await r3.json()).toEqual({ id: 2 });
     const r4 = await app.request(makeRequest('/idem', { method: 'POST' }));
     expect(await r4.json()).toEqual({ id: 3 });
+  });
+
+  it('@Idempotent rejects a repeated key with a different body (409)', async () => {
+    let calls = 0;
+    @Controller('/idem-hash')
+    class C {
+      @Post() @Public() @Idempotent()
+      create(c: Context) { calls++; return { id: calls }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    const key = { 'Idempotency-Key': 'k1', 'Content-Type': 'application/json' };
+
+    const r1 = await app.request(makeRequest('/idem-hash', { method: 'POST', headers: key, body: JSON.stringify({ item: 'A' }) }));
+    expect(r1.status).toBe(200);
+    expect(await r1.json()).toEqual({ id: 1 });
+
+    // same key + same body → replay
+    const r2 = await app.request(makeRequest('/idem-hash', { method: 'POST', headers: key, body: JSON.stringify({ item: 'A' }) }));
+    expect(await r2.json()).toEqual({ id: 1 });
+    expect(calls).toBe(1);
+
+    // same key + different body → 409, not a silent replay
+    const r3 = await app.request(makeRequest('/idem-hash', { method: 'POST', headers: key, body: JSON.stringify({ item: 'B' }) }));
+    expect(r3.status).toBe(409);
+    expect((await r3.json() as { code: string }).code).toBe('IDEMPOTENCY_CONFLICT');
+    expect(calls).toBe(1);
+  });
+
+  it('@Idempotent({ hash: false }) replays for a different body', async () => {
+    let calls = 0;
+    @Controller('/idem-nohash')
+    class C {
+      @Post() @Public() @Idempotent({ hash: false })
+      create() { calls++; return { id: calls }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    const key = { 'Idempotency-Key': 'k2', 'Content-Type': 'application/json' };
+
+    await app.request(makeRequest('/idem-nohash', { method: 'POST', headers: key, body: JSON.stringify({ item: 'A' }) }));
+    const r2 = await app.request(makeRequest('/idem-nohash', { method: 'POST', headers: key, body: JSON.stringify({ item: 'B' }) }));
+    expect(r2.status).toBe(200);
+    expect(await r2.json()).toEqual({ id: 1 });
+    expect(calls).toBe(1);
+  });
+
+  it('@Idempotent({ scope }) namespaces keys — no cross-scope replay', async () => {
+    let calls = 0;
+    @Controller('/idem-scope')
+    class C {
+      @Post() @Public() @Idempotent({ scope: (c) => c.req.header('x-tenant') ?? 'anon' })
+      create() { calls++; return { id: calls }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+
+    const r1 = await app.request(makeRequest('/idem-scope', { method: 'POST', headers: { 'Idempotency-Key': 'k', 'x-tenant': 'A' } }));
+    // tenant B reuses the same key — must NOT replay tenant A's response
+    const r2 = await app.request(makeRequest('/idem-scope', { method: 'POST', headers: { 'Idempotency-Key': 'k', 'x-tenant': 'B' } }));
+    // tenant A repeating the same key → replays
+    const r3 = await app.request(makeRequest('/idem-scope', { method: 'POST', headers: { 'Idempotency-Key': 'k', 'x-tenant': 'A' } }));
+
+    expect(await r1.json()).toEqual({ id: 1 });
+    expect(await r2.json()).toEqual({ id: 2 });
+    expect(await r3.json()).toEqual({ id: 1 });
+    expect(calls).toBe(2);
+  });
+
+  it('@Idempotent still replays when the handler later reads the body', async () => {
+    @Controller('/idem-body')
+    class C {
+      @Post() @Public() @Idempotent()
+      async create(c: Context) { const b = await c.req.json() as { n: number }; return { got: b.n }; }
+    }
+    const app = HonoRouteBuilder.build(C);
+    const key = { 'Idempotency-Key': 'k3', 'Content-Type': 'application/json' };
+
+    const r1 = await app.request(makeRequest('/idem-body', { method: 'POST', headers: key, body: JSON.stringify({ n: 7 }) }));
+    const r2 = await app.request(makeRequest('/idem-body', { method: 'POST', headers: key, body: JSON.stringify({ n: 7 }) }));
+    expect(await r1.json()).toEqual({ got: 7 });
+    expect(await r2.json()).toEqual({ got: 7 });
   });
 
   it('@SingleFlight shares one execution across concurrent identical requests', async () => {

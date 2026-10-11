@@ -23,6 +23,7 @@ import type {
   RateLimitMetadata,
   CacheMetadata,
   ChannelRouteMetadata,
+  ChannelAuthorizeFn,
   ModuleMetadata,
   OpenAPIMetadata,
   IdempotentMetadata,
@@ -53,6 +54,21 @@ async function computeEtag(body: string, weak: boolean): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
   const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 27);
   return `${weak ? 'W/' : ''}"${hex}"`;
+}
+
+/** SHA-256 hex of a request body — the @Idempotent conflict check. Uses
+ *  `c.req.arrayBuffer()` so the read goes through Hono's bodyCache: a body
+ *  already parsed by @Validate is reused, and the handler can still read
+ *  the body afterwards. Undefined only when an upstream read bypassed the
+ *  cache entirely (raw consumed). */
+async function hashRequestBody(c: Context): Promise<string | undefined> {
+  try {
+    const buf = await c.req.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return undefined;
+  }
 }
 
 /* ================= TYPES ================= */
@@ -145,6 +161,10 @@ export interface ResponseSnapshot {
   headers: Record<string, string>;
   /** Base64-encoded body. */
   body: string;
+  /** @Idempotent hash-check: sha256 of the request body that produced this
+   *  snapshot. A repeat of the key with a different hash is rejected 409
+   *  instead of replaying. Undefined on legacy stored entries (no check). */
+  requestHash?: string;
 }
 
 export type { RequestLogger, RequestLogEntry };
@@ -617,6 +637,28 @@ export class HonoRouteBuilder {
     const resolveChannel = (c: Context) =>
       typeof channelPattern === 'function' ? channelPattern(c) : channelPattern;
 
+    // @ChannelAuth — authorize the resolved channel as middleware, before the
+    // stream opens / the upgrade completes. Denied → 403, never subscribed.
+    // Only meaningful on @Sse/@WebSocket routes — skipped for plain HTTP.
+    const isStreamRoute = Boolean(
+      (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, unknown> | undefined)?.[handlerName] ??
+      (meta?.[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, unknown> | undefined)?.[handlerName]
+    );
+    const allChannelAuth = (meta?.[METADATA_KEYS.CHANNEL_AUTH] as Record<string, ChannelAuthorizeFn> | undefined) ?? {};
+    const channelAuthorize = allChannelAuth[handlerName];
+    if (isStreamRoute && channelPattern && channelAuthorize) {
+      middlewares.push(wrapMiddleware(async (c, next) => {
+        const channel = resolveChannel(c);
+        if (channel !== undefined) {
+          const ok = await channelAuthorize(c, channel);
+          if (!ok) {
+            throw HttpException.forbidden(`Not authorized for channel`, { code: 'CHANNEL_FORBIDDEN' });
+          }
+        }
+        return next();
+      }));
+    }
+
     /* ----- SSE Route ----- */
     const allSse = (meta?.[METADATA_KEYS.SSE_ROUTE] as Record<string, SseOptions> | undefined) ?? {};
     const sseMeta = allSse[handlerName];
@@ -806,14 +848,30 @@ export class HonoRouteBuilder {
       if (onRequestStart) await onRequestStart({ method: c.req.method, path: c.req.path, traceId, ip: extractIp(c), userAgent: ua });
 
       // @Idempotent — replay the stored response for a repeated key.
+      // `scope` namespaces the key (multi-tenant safety); `hash` (default on)
+      // rejects a same-key/different-body repeat with 409 instead of silently
+      // replaying a response the request didn't produce.
       let idemKey: string | undefined;
+      let idemHash: string | undefined;
       if (idemMeta) {
         const key = c.req.header('Idempotency-Key');
         if (key) {
-          idemKey = `idem:${c.req.method} ${c.req.path}:${key}`;
+          const scope = idemMeta.scope?.(c);
+          idemKey = `idem:${scope ? `${scope}:` : ''}${c.req.method} ${c.req.path}:${key}`;
+          if (idemMeta.hash !== false) idemHash = await hashRequestBody(c);
           const hit = await cacheAdapter.get(idemKey);
           if (hit) {
             const snap = hit.value as ResponseSnapshot;
+            if (idemHash !== undefined && snap.requestHash !== undefined && snap.requestHash !== idemHash) {
+              if (requestLogger) {
+                await requestLogger({ method: c.req.method, path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 409, durationMs: Date.now() - startMs, traceId });
+              }
+              return c.json(
+                { statusCode: 409, error: 'Conflict', code: 'IDEMPOTENCY_CONFLICT',
+                  message: 'Idempotency-Key was already used with a different request body' },
+                409
+              );
+            }
             if (requestLogger) {
               await requestLogger({ method: c.req.method, path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: snap.status, durationMs: Date.now() - startMs, traceId });
             }
@@ -896,7 +954,9 @@ export class HonoRouteBuilder {
       const dedupeKey = singleFlight
         ? `sf:${c.req.method} ${c.req.url}`
         : idemKey
-          ? `sf:${idemKey}`
+          // include the body hash so concurrent same-key/different-body calls
+          // don't share one execution — the loser hits the stored entry → 409
+          ? `sf:${idemKey}:${idemHash ?? ''}`
           : undefined;
 
       const logRequest = async (statusCode: number) => {
@@ -938,9 +998,10 @@ export class HonoRouteBuilder {
       }
 
       // Only successful responses are replayable via Idempotency-Key — a
-      // failed attempt must be retried, not replayed.
+      // failed attempt must be retried, not replayed. The request-body hash
+      // is stored alongside so a same-key/different-body repeat is a 409.
       if (idemKey && snap.status >= 200 && snap.status < 300) {
-        await cacheAdapter.set(idemKey, snap, idemMeta!.ttl ?? 86_400_000);
+        await cacheAdapter.set(idemKey, { ...snap, requestHash: idemHash }, idemMeta!.ttl ?? 86_400_000);
       }
 
       await logRequest(snap.status);

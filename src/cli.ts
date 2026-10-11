@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getClassMeta, METADATA_KEYS } from './decorators/metadata';
@@ -190,7 +191,9 @@ function commandHelp(name: string): string {
     for (const ex of spec.examples) lines.push(`  ${ex}`);
   }
   if (!spec.noEntryNote) {
-    lines.push('', `The entry file must export your @Module class (or @Controller classes).`, `TypeScript entries need Bun: bunx hono-forge ${name} ./src/app.module.ts`);
+    lines.push('', `The entry file must export your @Module class (or @Controller classes).`,
+      `TypeScript entries need Bun — when invoked under Node (e.g. bunx resolving the`,
+      `bin to a Node shim on Windows) the CLI re-execs itself via the 'bun' on PATH.`);
   }
   return lines.join('\n');
 }
@@ -312,14 +315,47 @@ function resolveTarget(mod: Record<string, unknown>, exportName?: string): Funct
   return candidates[0]!;
 }
 
+/** True when this process is Bun — `bunx`/`bun x` can still resolve the bin to a
+ *  Node shim on Windows, so never trust the invocation command, only the runtime. */
+const IS_BUN = typeof process.versions?.bun === 'string';
+const TS_ENTRY = /\.(?:tsx?|mts|cts)$/i;
+
+/** Absolute path to this CLI script — argv[1] is the executed file in both the
+ *  ESM and CJS builds, unlike import.meta.url (unavailable in CJS output). */
+function cliScriptPath(): string {
+  return resolve(process.argv[1] ?? 'cli.js');
+}
+
+/** Re-exec this CLI under Bun with identical args. Returns false when no `bun`
+ *  binary is on PATH — the caller then reports the accurate manual command. */
+function reexecUnderBun(): boolean {
+  const r = spawnSync('bun', [cliScriptPath(), ...process.argv.slice(2)], {
+    stdio: 'inherit',
+  });
+  if (r.error) return false;
+  process.exit(r.status ?? 0);
+}
+
 /** Import the entry file, mapping loader failures to actionable CLI errors. */
 async function importEntry(entryPath: string, display: string, command: string): Promise<Record<string, unknown>> {
   try {
     return await import(pathToFileURL(entryPath).href) as Record<string, unknown>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (/unknown file extension|ERR_UNKNOWN_FILE_EXTENSION|Cannot find module/i.test(msg)) {
-      fail(`Could not load '${display}'. TypeScript files need Bun — run: bunx hono-forge ${command} ${display}`);
+    if (/unknown file extension|ERR_UNKNOWN_FILE_EXTENSION/i.test(msg)) {
+      // TypeScript entry under Node — most commonly `bunx hono-forge` on Windows,
+      // where the package bin resolves to a Node shim. If Bun is installed,
+      // transparently re-exec so the documented workflow just works.
+      if (!IS_BUN && TS_ENTRY.test(display) && reexecUnderBun()) return {} as never;
+      if (!IS_BUN) {
+        fail(`Could not load '${display}'. TypeScript entries need Bun, but this CLI is running under Node\n` +
+          `  (bunx/npx resolve the bin to a Node shim on Windows). Run via Bun directly:\n` +
+          `    bun ${cliScriptPath()} ${command} ${display}`);
+      }
+      fail(`Could not load '${display}' — ${msg}`);
+    }
+    if (/Cannot find module/i.test(msg)) {
+      fail(`Could not load '${display}' — file not found or a broken import inside it. ${msg}`);
     }
     throw err;
   }
