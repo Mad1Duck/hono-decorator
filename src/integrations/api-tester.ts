@@ -51,6 +51,9 @@ export interface FlowAssertion {
   path: string;
   operator: 'equals' | 'notEquals' | 'contains' | 'exists' | 'greaterThan' | 'lessThan';
   expected?: unknown;
+  /** Mirrors api-tester: only evaluate when the response status matches —
+   *  keeps shape assertions from failing on error responses. */
+  forStatus?: number;
 }
 
 export interface ApiTesterRestConfig {
@@ -238,6 +241,46 @@ function statusAssertion(
   return [{ path: '$status', operator: 'equals', expected: String(expected) }];
 }
 
+const MAX_SHAPE_ASSERTIONS = 8;
+
+/** Required property paths of an object JSON Schema — `$.a`, `$.b` (or `$[0].a` for arrays). */
+function shapePaths(js: Record<string, unknown>, prefix: string): string[] {
+  const props = js.properties as Record<string, unknown> | undefined;
+  const required = Array.isArray(js.required) ? (js.required as string[]) : [];
+  if (!props || !required.length) return [];
+  return required
+    .filter((p) => props[p] !== undefined)
+    .slice(0, MAX_SHAPE_ASSERTIONS)
+    .map((p) => `${prefix}${p}`);
+}
+
+/**
+ * `@Serialize`/`@ValidateResult`-style response contracts → seeded `exists`
+ * assertions for the response's required top-level fields, scoped to the
+ * success status. Cheap contract coverage without a schema-eval assertion type.
+ */
+function responseShapeAssertions(
+  route: RouteDescription,
+  statusByHandler: Record<string, ResponseStatusMetadata>,
+  serializeMap: Record<string, ZodType>,
+): FlowAssertion[] {
+  const zod = serializeMap[route.handlerName] ?? serializeMap['*'];
+  if (!zod) return [];
+  try {
+    const js = zodToJsonSchema(zod) as Record<string, unknown>;
+    const forStatus =
+      statusByHandler[route.handlerName]?.status ??
+      (route.method === 'delete' ? 204 : 200);
+    const paths =
+      js.type === 'array'
+        ? shapePaths((js.items ?? {}) as Record<string, unknown>, '$[0].')
+        : shapePaths(js, '$.');
+    return paths.map((path) => ({ path, operator: 'exists' as const, forStatus }));
+  } catch {
+    return [];
+  }
+}
+
 /* ================= GENERATOR ================= */
 
 interface BuiltControllerNodes {
@@ -260,6 +303,8 @@ function buildControllerNodes(
     getClassMeta<Record<string, ValidationMetadata>>(ControllerClass, METADATA_KEYS.VALIDATION) ?? {};
   const statusMap =
     getClassMeta<Record<string, ResponseStatusMetadata>>(ControllerClass, METADATA_KEYS.RESPONSE_STATUS) ?? {};
+  const serializeMap =
+    getClassMeta<Record<string, ZodType>>(ControllerClass, METADATA_KEYS.SERIALIZE) ?? {};
 
   // Item-route params that a sibling collection POST can provide via extractor.
   const itemParams = new Set(
@@ -343,6 +388,7 @@ function buildControllerNodes(
         rest.body = JSON.stringify(jsonSchemaToExample(zodToJsonSchema(validation.body as ZodType)), null, 2);
       }
       rest.assertions.push(...assertions);
+      rest.assertions.push(...responseShapeAssertions(route, statusMap, serializeMap));
       config = rest;
     }
 
