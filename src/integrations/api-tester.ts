@@ -9,6 +9,7 @@ import {
 } from '../decorators/metadata';
 import { HonoRouteBuilder, type RouteDescription } from '../core/route-builder';
 import { zodToJsonSchema } from '../openapi/generator';
+import { yamlStringify } from '../utils/yaml';
 
 /**
  * api-tester integration — generate ready-to-run flow files (FlowFile v1)
@@ -481,72 +482,9 @@ export function generateFlowFile(
   };
 }
 
-/* ================= YAML EMITTER (dependency-free) ================= */
-
-const YAML_PLAIN = /^[A-Za-z0-9 _.\/-]+$/;
-const YAML_KEYWORDS = /^(true|false|null|yes|no|on|off|~)$/i;
-
-function yamlScalar(v: unknown): string {
-  if (v === null || v === undefined) return 'null';
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  const s = String(v);
-  if (s !== '' && YAML_PLAIN.test(s) && !YAML_KEYWORDS.test(s) && !/^\d/.test(s)) return s;
-  return JSON.stringify(s);
-}
-
-function yamlEntry(key: string, v: unknown, pad: string, indent: number): string[] {
-  if (isScalar(v)) return [`${pad}${key}: ${yamlScalar(v)}`];
-  if (Array.isArray(v) && !v.length) return [`${pad}${key}: []`];
-  if (isObject(v) && !Object.keys(v).length) return [`${pad}${key}: {}`];
-  return [`${pad}${key}:`, ...yamlLines(v, indent + 1)];
-}
-
-function yamlLines(value: unknown, indent: number): string[] {
-  const pad = '  '.repeat(indent);
-  if (Array.isArray(value)) {
-    return value.flatMap(item => {
-      if (isObject(item)) {
-        const entries = Object.entries(item as Record<string, unknown>).filter(([, v]) => v !== undefined);
-        if (!entries.length) return [`${pad}- {}`];
-        const [k, v] = entries[0]!;
-        const head = isScalar(v)
-          ? `${pad}- ${k}: ${yamlScalar(v)}`
-          : Array.isArray(v) && !v.length
-            ? `${pad}- ${k}: []`
-            : isObject(v) && !Object.keys(v).length
-              ? `${pad}- ${k}: {}`
-              : `${pad}- ${k}:`;
-        const rest = [
-          ...(isScalar(v) || (Array.isArray(v) && !v.length) || (isObject(v) && !Object.keys(v).length)
-            ? []
-            : yamlLines(v, indent + 2)),
-          ...entries.slice(1).flatMap(([k2, v2]) => yamlEntry(k2, v2, `${pad}  `, indent + 1)),
-        ];
-        return [head, ...rest];
-      }
-      if (Array.isArray(item)) return [`${pad}-`, ...yamlLines(item, indent + 1)];
-      return [`${pad}- ${yamlScalar(item)}`];
-    });
-  }
-  if (isObject(value)) {
-    const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined);
-    if (!entries.length) return [`${pad}{}`];
-    return entries.flatMap(([k, v]) => yamlEntry(k, v, pad, indent));
-  }
-  return [`${pad}${yamlScalar(value)}`];
-}
-
-function isScalar(v: unknown): boolean {
-  return v === null || typeof v !== 'object';
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
 /** Serialize a FlowFile to YAML understood by api-tester's `yamlToFlow`. */
 export function stringifyFlowFile(file: ApiTesterFlowFile): string {
-  return yamlLines(file, 0).join('\n') + '\n';
+  return yamlStringify(file);
 }
 
 /**

@@ -27,3 +27,4 @@ export { mountMetrics, getMetricsRegistry, MetricsRegistry } from './metrics';
 export type { MetricsOptions } from './metrics';
 export { createApp } from './app';
 export type { CreateAppOptions } from './app';
+export { yamlStringify } from './yaml';

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getClassMeta, METADATA_KEYS } from './decorators/metadata';
@@ -11,6 +11,7 @@ import { OpenAPIGenerator } from './openapi/generator';
 import { generateClientTypes } from './utils/client';
 import { initProject } from './cli-init';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
+import { extractDbSchema, stringifyDbSchema } from './integrations/db-schema';
 import type { ProviderDescription } from './core/container';
 
 function formatMermaid(rows: ProviderDescription[]): string {
@@ -66,6 +67,19 @@ const COMMANDS: Record<string, CommandSpec> = {
       'bunx hono-forge init my-api',
       '# → my-api/ with src/app.module.ts, a sample controller, tsconfig,',
       '#   package.json — then: cd my-api && bun install && bun run dev',
+    ],
+  },
+  schema: {
+    desc: 'database schema → .schema.yaml (Drizzle tables)',
+    noEntryNote: true,
+    opts: [
+      ['--out <file>', 'output file (default ./db.schema.yaml)'],
+      ['--json', 'emit JSON instead of YAML'],
+    ],
+    examples: [
+      'bunx hono-forge schema ./src/db/schema.ts --out ./db.schema.yaml',
+      '# the entry file should export your pgTable/mysqlTable/sqliteTable objects',
+      '# then in api-tester: Database → Import schema',
     ],
   },
   flows: {
@@ -317,6 +331,24 @@ async function main(): Promise<void> {
       fail(`Could not load '${args.entry}'. TypeScript files need Bun — run: bunx hono-forge ${args.command} ${args.entry}`);
     }
     throw err;
+  }
+
+  // `schema` scans exports for Drizzle tables — not @Module/@Controller classes.
+  if (args.command === 'schema') {
+    const schema = extractDbSchema(mod, { entryFile: entryPath });
+    if (schema.tables.length === 0) {
+      fail(`No Drizzle table exports found in '${args.entry}' — export your pgTable/mysqlTable/sqliteTable objects there.`);
+    }
+    const out = resolve(process.cwd(), args.out ?? './db.schema.yaml');
+    await mkdir(dirname(out), { recursive: true });
+    if (args.json) {
+      await writeFile(out, JSON.stringify(schema, null, 2) + '\n', 'utf8');
+    } else {
+      await writeFile(out, stringifyDbSchema(schema), 'utf8');
+    }
+    console.log(`Wrote ${out} — ${schema.tables.length} table(s)` +
+      (schema.dialect ? ` (${schema.dialect})` : ''));
+    return;
   }
 
   const target = resolveTarget(mod, args.exportName);
