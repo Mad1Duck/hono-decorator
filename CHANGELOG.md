@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.6.1](https://github.com/Mad1Duck/hono-decorator/compare/v5.6.0...v5.6.1) (2026-10-11)
+
+### Features
+
+* generated flows emit complete request/response metadata ([c6c4e98](https://github.com/Mad1Duck/hono-decorator/commit/c6c4e989d014d77c2984dd9f68166e435b9dd992))
+* generated flows now carry request bodies for all mutations ([591e61e](https://github.com/Mad1Duck/hono-decorator/commit/591e61e25d7fff424c8de46b12d45c17be2a3008))
+
 ## [5.6.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.5.2...v5.6.0) (2026-10-11)
 
 ### Features
