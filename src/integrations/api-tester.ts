@@ -4,6 +4,7 @@ import type { ZodType } from 'zod';
 import {
   getClassMeta,
   METADATA_KEYS,
+  type OpenAPIMetadata,
   type ResponseStatusMetadata,
   type ValidationMetadata,
 } from '../decorators/metadata';
@@ -354,6 +355,8 @@ function buildControllerNodes(
 
   const validationMap =
     getClassMeta<Record<string, ValidationMetadata>>(ControllerClass, METADATA_KEYS.VALIDATION) ?? {};
+  const openapiMap =
+    getClassMeta<Record<string, OpenAPIMetadata>>(ControllerClass, METADATA_KEYS.OPENAPI) ?? {};
   const statusMap =
     getClassMeta<Record<string, ResponseStatusMetadata>>(ControllerClass, METADATA_KEYS.RESPONSE_STATUS) ?? {};
   const serializeMap =
@@ -443,10 +446,18 @@ function buildControllerNodes(
         extractors,
         assertions: statusAssertion(route, statusMap),
       };
-      if (validation?.body && method !== 'GET' && method !== 'DELETE') {
+      if (method !== 'GET' && method !== 'DELETE') {
+        // @Validate({body}) is the primary source; @ApiBody(schema) documents
+        // the same shape for routes that validate inside the handler instead.
+        const bodySchema = validation?.body ?? openapiMap[route.handlerName]?.body?.schema;
         rest.bodyMode = 'raw';
         headers.push(kv('Content-Type', 'application/json'));
-        rest.body = JSON.stringify(jsonSchemaToExample(zodToJsonSchema(validation.body as ZodType)), null, 2);
+        // Schema-less mutation — leave the raw editor empty-but-visible so the
+        // user sees a body field exists (an empty string sends no body, so this
+        // is safe even for endpoints that take none).
+        rest.body = bodySchema
+          ? JSON.stringify(jsonSchemaToExample(zodToJsonSchema(bodySchema)), null, 2)
+          : '';
       }
       rest.assertions.push(...assertions);
       rest.assertions.push(...responseShapeAssertions(route, statusMap, serializeMap));

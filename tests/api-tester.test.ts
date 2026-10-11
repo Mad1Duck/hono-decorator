@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 import {
+  ApiBody,
   Controller,
   Delete,
   Get,
@@ -58,6 +59,16 @@ class TodoController {
 
 @Module({ controllers: [TodoController], providers: [TodoService] })
 class TodoModule {}
+
+@Controller('/docs')
+class DocsController {
+  @Post('/upload') @Public()
+  @ApiBody(z.object({ file: z.string(), name: z.string() }))
+  upload() { return {}; }
+
+  @Post('/ping') @Public()
+  ping() { return {}; }
+}
 
 describe('generateFlowFiles', () => {
   const [result] = generateFlowFiles(TodoModule, { baseUrl: 'http://localhost:4000' });
@@ -135,6 +146,42 @@ describe('generateFlowFiles', () => {
     const ws = file.nodes.find(n => n.label.includes('/ws'))!.config as ApiTesterWsConfig;
     expect(ws.type).toBe('ws');
     expect(ws.url).toBe('ws://localhost:4000/todos/ws');
+  });
+});
+
+describe('generateFlowFiles — body detection without @Validate', () => {
+  const [result] = generateFlowFiles(DocsController);
+  const file = result!.file;
+
+  test('@ApiBody schema becomes a sample JSON payload', () => {
+    const upload = file.nodes.find((n) => n.label.includes('/upload'))!
+      .config as ApiTesterRestConfig;
+    expect(upload.bodyMode).toBe('raw');
+    const body = JSON.parse(upload.body!) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['file', 'name']);
+    expect(upload.headers).toContainEqual({
+      key: 'Content-Type',
+      value: 'application/json',
+      enabled: true,
+    });
+  });
+
+  test('schema-less POST still gets a visible (empty) raw body field', () => {
+    const ping = file.nodes.find((n) => n.label.includes('/ping'))!
+      .config as ApiTesterRestConfig;
+    expect(ping.bodyMode).toBe('raw');
+    // empty string = the field renders but nothing is sent
+    expect(ping.body).toBe('');
+    expect(ping.headers).toContainEqual({
+      key: 'Content-Type',
+      value: 'application/json',
+      enabled: true,
+    });
+  });
+
+  test('GET routes still carry no body config', () => {
+    const get = file.nodes.find((n) => n.label.startsWith('GET'));
+    expect(get).toBeUndefined(); // DocsController has no GET — sanity
   });
 });
 
