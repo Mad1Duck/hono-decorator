@@ -1,5 +1,13 @@
 # Changelog
 
+## [5.5.1](https://github.com/Mad1Duck/hono-decorator/compare/v5.5.0...v5.5.1) (2026-10-11)
+
+### Features
+
+* hono-forge schema command - export Drizzle tables to .schema.yaml ([fccd850](https://github.com/Mad1Duck/hono-decorator/commit/fccd85043a0b1699c1489b05b12b9d0db95b4e22))
+* schema command sources beyond Drizzle — prisma, live pg, file passthrough ([ee3962c](https://github.com/Mad1Duck/hono-decorator/commit/ee3962c8e9907a4188c5f27987153662ced40e8c))
+* seed response-shape assertions from @Serialize in generated flows ([ffc6e0e](https://github.com/Mad1Duck/hono-decorator/commit/ffc6e0e23f8a7920308cabfbac7829ec8b18c4c5))
+
 ## [5.5.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.3.0...v5.5.0) (2026-10-11)
 
 ### Features
