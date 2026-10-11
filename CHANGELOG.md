@@ -1,5 +1,11 @@
 # Changelog
 
+## [5.6.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.5.2...v5.6.0) (2026-10-11)
+
+### Features
+
+* durable cache adapters (Redis/Postgres) + named per-decorator selection, flows --auth preamble ([b95af23](https://github.com/Mad1Duck/hono-decorator/commit/b95af2304c595d832217f686378551c83eca6c94)), closes [#5](https://github.com/Mad1Duck/hono-decorator/issues/5) [#6](https://github.com/Mad1Duck/hono-decorator/issues/6)
+
 ## [5.5.2](https://github.com/Mad1Duck/hono-decorator/compare/v5.5.1...v5.5.2) (2026-10-11)
 
 ### Bug Fixes
