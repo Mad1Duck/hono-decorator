@@ -152,6 +152,9 @@ export interface OpenAPIMetadata {
 export interface CacheMetadata {
   ttl: number;
   key?: string;
+  /** Name of a `configure().cacheAdapters` entry to use instead of the
+   *  default `cacheAdapter` — e.g. 'redis' for a shared volatile cache. */
+  adapter?: string;
 }
 
 /* ================= CHANNEL ROUTE ================= */
@@ -186,6 +189,10 @@ export interface IdempotentMetadata {
    * differing payloads.
    */
   hash?: boolean;
+  /** Name of a `configure().cacheAdapters` entry to use instead of the
+   *  default `cacheAdapter` — e.g. 'pg' for a durable idempotency store
+   *  that survives restarts and is shared across instances. */
+  adapter?: string;
 }
 
 /** @Header metadata — static response headers per method. */

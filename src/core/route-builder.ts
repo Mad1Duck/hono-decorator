@@ -123,6 +123,12 @@ export interface RouteBuilderConfig {
   errorFormat?: 'envelope' | 'problem';
   /** Pluggable store for @Cache / @CacheInvalidate — defaults to in-memory. */
   cacheAdapter?: CacheAdapter;
+  /** Named adapter registry for per-decorator selection —
+   *  `@Idempotent({ adapter: 'pg' })` / `@Cache({ adapter: 'redis' })` pick
+   *  an entry here instead of `cacheAdapter`. Register e.g.
+   *  `{ pg: new PostgresCacheAdapter(q), redis: new RedisCacheAdapter(r) }`.
+   *  Unknown names fail fast at route-build time. */
+  cacheAdapters?: Record<string, CacheAdapter>;
 }
 
 /** Serializable snapshot of a controller route's metadata — see describe(). */
@@ -528,7 +534,21 @@ export class HonoRouteBuilder {
     const cacheMeta = allCache[handlerName];
     const allInvalidate = (meta?.[METADATA_KEYS.CACHE_INVALIDATE] as Record<string, string[]> | undefined) ?? {};
     const invalidatePatterns = allInvalidate[handlerName];
-    const cacheAdapter = this.config.cacheAdapter ?? defaultCacheAdapter;
+    // Per-decorator store selection — a named adapter must exist or the
+    // misconfiguration surfaces now, at route build, not at first request.
+    const adapterFor = (name?: string): CacheAdapter => {
+      if (!name) return this.config.cacheAdapter ?? defaultCacheAdapter;
+      const named = this.config.cacheAdapters?.[name];
+      if (!named) {
+        const have = Object.keys(this.config.cacheAdapters ?? {}).join(', ') || '(none)';
+        throw new Error(
+          `Route "${handlerName}" references cache adapter "${name}" — ` +
+          `configure().cacheAdapters only has: ${have}`,
+        );
+      }
+      return named;
+    };
+    const routeCacheAdapter = adapterFor(cacheMeta?.adapter);
 
     const routeLabel = `${method.toUpperCase()} ${basePath}${path}`;
 
@@ -804,6 +824,7 @@ export class HonoRouteBuilder {
     /* ----- Response-shaping metadata ----- */
     const allIdempotent = (meta?.[METADATA_KEYS.IDEMPOTENT] as Record<string, IdempotentMetadata> | undefined) ?? {};
     const idemMeta = allIdempotent[handlerName];
+    const idemAdapter = adapterFor(idemMeta?.adapter);
     const allSingleFlight = (meta?.[METADATA_KEYS.SINGLE_FLIGHT] as Record<string, boolean> | undefined) ?? {};
     const singleFlight = allSingleFlight[handlerName] ?? false;
     const allHeaders = (meta?.[METADATA_KEYS.HEADERS] as Record<string, HeadersMetadata> | undefined) ?? {};
@@ -859,7 +880,7 @@ export class HonoRouteBuilder {
           const scope = idemMeta.scope?.(c);
           idemKey = `idem:${scope ? `${scope}:` : ''}${c.req.method} ${c.req.path}:${key}`;
           if (idemMeta.hash !== false) idemHash = await hashRequestBody(c);
-          const hit = await cacheAdapter.get(idemKey);
+          const hit = await idemAdapter.get(idemKey);
           if (hit) {
             const snap = hit.value as ResponseSnapshot;
             if (idemHash !== undefined && snap.requestHash !== undefined && snap.requestHash !== idemHash) {
@@ -884,7 +905,7 @@ export class HonoRouteBuilder {
       if (cacheMeta) {
         const url = new URL(c.req.url);
         cacheKey = `${cacheMeta.key ?? handlerName}:${url.pathname}${url.search}`;
-        const hit = await cacheAdapter.get(cacheKey);
+        const hit = await routeCacheAdapter.get(cacheKey);
         if (hit) {
           if (requestLogger) {
             await requestLogger({ method: c.req.method, path: c.req.path, ip: extractIp(c), device: detectDevice(ua), userAgent: ua, statusCode: 200, durationMs: Date.now() - startMs, traceId });
@@ -918,13 +939,13 @@ export class HonoRouteBuilder {
               : raw;
             if (invalidatePatterns) {
               for (const pattern of invalidatePatterns) {
-                await cacheAdapter.deletePattern(pattern);
+                await routeCacheAdapter.deletePattern(pattern);
               }
             }
             if (result instanceof Response) return result;
             if (statusMeta?.ignoreBody) return c.body(null, statusMeta.status as StatusCode);
             if (cacheMeta && cacheKey !== undefined && result !== undefined) {
-              await cacheAdapter.set(cacheKey, result, cacheMeta.ttl);
+              await routeCacheAdapter.set(cacheKey, result, cacheMeta.ttl);
             }
             if (result !== undefined) {
               if (etagMeta) {
@@ -1001,7 +1022,7 @@ export class HonoRouteBuilder {
       // failed attempt must be retried, not replayed. The request-body hash
       // is stored alongside so a same-key/different-body repeat is a 409.
       if (idemKey && snap.status >= 200 && snap.status < 300) {
-        await cacheAdapter.set(idemKey, { ...snap, requestHash: idemHash }, idemMeta!.ttl ?? 86_400_000);
+        await idemAdapter.set(idemKey, { ...snap, requestHash: idemHash }, idemMeta!.ttl ?? 86_400_000);
       }
 
       await logRequest(snap.status);

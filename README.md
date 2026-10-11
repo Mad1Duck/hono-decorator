@@ -1552,12 +1552,37 @@ Clears matching cache entries after a mutation handler succeeds. Each pattern is
 create(c: Context) { /* ... */ }
 ```
 
-Swap the in-memory store for Redis or another shared backend via `cacheAdapter`:
+Swap the in-memory store for a durable backend via `cacheAdapter` — or pick a store per decorator with named `cacheAdapters`:
 
 ```ts
-HonoRouteBuilder.configure({ cacheAdapter: new MyRedisCacheAdapter(redis) });
-// implements CacheAdapter: get / set / delete / deletePattern
+import Redis from 'ioredis';
+import { Pool } from 'pg';
+
+const redis = new Redis();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pgCache = new PostgresCacheAdapter((sql, params) => pool.query(sql, params));
+await pool.query(PostgresCacheAdapter.createTableSql()); // once, at deploy time
+
+HonoRouteBuilder.configure({
+  // fallback for anything without an explicit adapter name
+  cacheAdapter: new RedisCacheAdapter(redis),
+  // per-decorator selection — @Cache({ adapter: 'redis' }), @Idempotent({ adapter: 'pg' })
+  cacheAdapters: {
+    redis: new RedisCacheAdapter(redis),
+    pg: pgCache,
+  },
+});
 ```
+
+**Durability matrix** — pick by feature, not globally:
+
+| Store | Survives restart | Shared across replicas | Best for |
+|---|---|---|---|
+| `InMemoryCacheAdapter` (default) | ✗ | ✗ | dev/tests only |
+| `RedisCacheAdapter` | ✓ | ✓ | `@Cache` — fast, TTL-native, volatile |
+| `PostgresCacheAdapter` | ✓ | ✓ | `@Idempotent` — atomic upsert claim, zero extra infra |
+
+`PostgresCacheAdapter` is driver-free — it takes any `(sql, params) => Promise<{rows}>` function (`pg`, `postgres`, Drizzle/Kysely wrapped, etc.) and one table (`createTableSql()` ships the DDL). `RedisCacheAdapter` takes an ioredis-shaped client (`get`/`set … 'PX'`/`del`/`keys`); node-redis needs a two-line wrapper.
 
 ### `@Idempotent`
 
@@ -1579,7 +1604,7 @@ createOrder(c: Context) { /* runs at most once per key */ }
 createOrder(c: Context) { /* keys are scoped per tenant+outlet */ }
 ```
 
-> ⚠ **The default store is in-memory per process.** Stored responses are lost on restart and not shared across replicas — for production idempotency configure a durable `cacheAdapter` (e.g. Redis).
+> ⚠ **The default store is in-memory per process.** Stored responses are lost on restart and not shared across replicas — for production idempotency use a durable adapter, e.g. `@Idempotent({ adapter: 'pg' })` with `PostgresCacheAdapter` (see the durability matrix above).
 
 ### `@SingleFlight`
 
@@ -2080,6 +2105,11 @@ await writeFlowFiles('./flows', AppModule, { baseUrl: 'http://localhost:3000' })
 bunx hono-forge init my-api                        # scaffold a runnable starter project
 bunx hono-forge flows ./src/app.module.ts --out ./flows --base-url http://localhost:3000
 bunx hono-forge flows ./src/app.module.ts --single   # one file, a group per controller
+# authenticated APIs — prepend a login step so {{token}} comes from a real response:
+bunx hono-forge flows ./src/app.module.ts \
+  --auth 'POST /v1/auth/login' \
+  --auth-body '{"username":"{{user}}","password":"{{pass}}"}' \
+  --auth-extract 'token=data.accessToken'
 bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without a server
 bunx hono-forge routes ./src/app.module.ts           # route table for CI/debugging
 bunx hono-forge routes ./src/app.module.ts --json    # machine-readable route table
@@ -2089,6 +2119,8 @@ bunx hono-forge doctor ./src/app.module.ts           # static wiring check — e
 bunx hono-forge doctor ./src/app.module.ts --json    # JSON issue list for CI/IDE
 bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts  # typed client route map
 ```
+
+**`flows --auth`** — guarded routes get `Authorization: Bearer {{token}}` headers already, but without a producer that variable is blank and every request 401s. `--auth` prepends a login node whose extractors produce `{{token}}` (or any `var=jsonpath` pairs in `--auth-extract`, default `token=data.accessToken`); `{{vars}}` in `--auth-body` become editable flow variables so credentials stay out of the generated file. In `--single` mode one ungrouped login node is wired into every controller group. Programmatic equivalent: `writeFlowFiles(dir, AppModule, { auth: { method, path, body, extract } })`.
 
 `init` writes a runnable project — `app.module.ts`, an example controller/service, `src/index.ts` wiring health + OpenAPI docs + graceful shutdown, `package.json`, `tsconfig.json` (TC39 decorators configured), `README.md`, and `.gitignore`. Then `cd my-api && bun install && bun run dev` serves `/hello`, `/health`, `/openapi.json`, and interactive docs at `/docs`. Every command supports `--help` (or `hono-forge help <command>`) with flag docs and examples.
 

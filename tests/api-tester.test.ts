@@ -161,6 +161,68 @@ describe('generateFlowFile (single file)', () => {
   });
 });
 
+describe('generateFlowFiles — auth preamble', () => {
+  const auth = {
+    method: 'POST' as const,
+    path: '/v1/auth/login',
+    body: '{"username":"{{user}}","password":"{{pass}}"}',
+    extract: { token: 'data.accessToken' },
+  };
+  const [result] = generateFlowFiles(TodoModule, { auth });
+  const file = result!.file;
+
+  test('prepends a login node that extracts the token', () => {
+    const first = file.nodes[0]!;
+    expect(first.label).toContain('POST /v1/auth/login');
+    const cfg = first.config as ApiTesterRestConfig;
+    expect(cfg.method).toBe('POST');
+    expect(cfg.url).toBe('/v1/auth/login');
+    expect(cfg.extractors).toEqual([
+      { variableName: 'token', path: '$.data.accessToken' },
+    ]);
+    expect(cfg.body).toContain('{{user}}');
+    expect(cfg.headers).toContainEqual({
+      key: 'Content-Type',
+      value: 'application/json',
+      enabled: true,
+    });
+  });
+
+  test('chains login → first route and shifts positions down', () => {
+    expect(file.nodes[0]!.position.y).toBe(0);
+    expect(file.nodes[1]!.position.y).toBe(110);
+    expect(file.edges[0]!.source).toBe(file.nodes[0]!.id);
+    expect(file.edges[0]!.target).toBe(file.nodes[1]!.id);
+    expect(file.edges).toHaveLength(file.nodes.length - 1);
+  });
+
+  test('token is produced by login — only credentials stay editable', () => {
+    const vars = file.settings?.defaultVariables ?? [];
+    expect(vars.find((v) => v.key === 'token')).toBeUndefined();
+    expect(vars.some((v) => v.key === 'user')).toBe(true);
+    expect(vars.some((v) => v.key === 'pass')).toBe(true);
+  });
+});
+
+describe('generateFlowFile — auth preamble (single file)', () => {
+  const { file } = generateFlowFile(TodoModule, {
+    auth: { method: 'POST', path: '/v1/auth/login', extract: { token: 'data.accessToken' } },
+  });
+
+  test('one ungrouped login node edged into the group start', () => {
+    const authNode = file.nodes.find((n) => !n.groupId);
+    expect(authNode).toBeDefined();
+    expect(authNode!.label).toContain('POST /v1/auth/login');
+    const groupFirst = file.nodes.find((n) => n.groupId);
+    expect(
+      file.edges.some((e) => e.source === authNode!.id && e.target === groupFirst!.id),
+    ).toBe(true);
+    expect(
+      file.settings?.defaultVariables?.some((v) => v.key === 'token'),
+    ).toBeFalsy();
+  });
+});
+
 describe('stringifyFlowFile', () => {
   test('emits YAML that parses back to the same structure', () => {
     const [result] = generateFlowFiles(TodoModule);

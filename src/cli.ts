@@ -11,7 +11,7 @@ import { parseCron } from './core/cron';
 import { OpenAPIGenerator } from './openapi/generator';
 import { generateClientTypes } from './utils/client';
 import { initProject } from './cli-init';
-import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
+import { writeFlowFile, writeFlowFiles, type FlowAuthSpec } from './integrations/api-tester';
 import {
   extractDbSchema, introspectPostgresSchema, normalizeDbSchemaDoc,
   parsePrismaSchema, readDbSchemaDoc, stringifyDbSchema,
@@ -102,11 +102,17 @@ const COMMANDS: Record<string, CommandSpec> = {
       ['--out <dir>', 'output dir (default ./flows)'],
       ['--base-url <url>', 'flow settings baseUrl (default http://localhost:3000)'],
       ['--single', 'one file with a visual group per controller'],
+      ['--auth <method path>', "prepend a login step, e.g. --auth 'POST /v1/auth/login'"],
+      ['--auth-body <json>', 'auth request body — {{vars}} become editable variables'],
+      ['--auth-extract <v=p,...>', 'auth extractors (default token=data.accessToken)'],
       ...COMMON_OPTS,
     ],
     examples: [
       'bunx hono-forge flows ./src/app.module.ts --out ./flows',
       'bunx hono-forge flows ./src/app.module.ts --single --base-url http://localhost:3000',
+      "bunx hono-forge flows ./src/app.module.ts --auth 'POST /v1/auth/login' \\",
+      "  --auth-body '{\"username\":\"{{user}}\",\"password\":\"{{pass}}\"}' \\",
+      "  --auth-extract 'token=data.accessToken'",
       '# then in api-tester: Import flow → pick a .flow.yaml → Run',
     ],
   },
@@ -250,6 +256,12 @@ interface CliArgs {
   from?: string;
   /** `schema --from pg` connection string (alternative to positional entry). */
   connect?: string;
+  /** `flows` auth preamble — '<METHOD> <path>', e.g. 'POST /v1/auth/login'. */
+  auth?: string;
+  /** `flows` auth request body (may contain {{vars}}). */
+  authBody?: string;
+  /** `flows` auth extractors — 'var=jsonpath' pairs, comma-separated. */
+  authExtract?: string;
   help: boolean;
 }
 
@@ -271,6 +283,9 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--import-path') args.importPath = rest[++i]!;
     else if (a === '--from') args.from = rest[++i]!;
     else if (a === '--connect') args.connect = rest[++i]!;
+    else if (a === '--auth') args.auth = rest[++i]!;
+    else if (a === '--auth-body') args.authBody = rest[++i]!;
+    else if (a === '--auth-extract') args.authExtract = rest[++i]!;
     else if (a === '-h' || a === '--help') args.help = true;
     else if (!a.startsWith('-') && !args.entry) args.entry = a;
     else fail(`Unknown argument: ${a}`);
@@ -601,14 +616,36 @@ async function main(): Promise<void> {
   }
 
   const out = args.out ?? './flows';
+  const auth = buildAuthSpec(args);
   if (args.single) {
-    const path = await writeFlowFile(out, target, { baseUrl: args.baseUrl });
+    const path = await writeFlowFile(out, target, { baseUrl: args.baseUrl, auth });
     console.log(`Wrote ${path}`);
   } else {
-    const paths = await writeFlowFiles(out, target, { baseUrl: args.baseUrl });
+    const paths = await writeFlowFiles(out, target, { baseUrl: args.baseUrl, auth });
     console.log(`Wrote ${paths.length} flow file(s):`);
     for (const p of paths) console.log(`  • ${p}`);
   }
+}
+
+/** Parse `--auth 'POST /path'` + `--auth-body` + `--auth-extract` into a FlowAuthSpec. */
+function buildAuthSpec(args: CliArgs): FlowAuthSpec | undefined {
+  if (!args.auth) return undefined;
+  const m = args.auth.trim().match(/^(\w+)\s+(\S+)$/);
+  if (!m || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(m[1]!.toUpperCase())) {
+    fail(`--auth expects '<METHOD> <path>', e.g. --auth 'POST /v1/auth/login' — got '${args.auth}'`);
+  }
+  const extract: Record<string, string> = {};
+  for (const pair of (args.authExtract ?? 'token=data.accessToken').split(',')) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) fail(`--auth-extract expects var=path pairs — got '${pair}'`);
+    extract[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+  }
+  return {
+    method: m[1]!.toUpperCase() as FlowAuthSpec['method'],
+    path: m[2]!,
+    body: args.authBody,
+    extract,
+  };
 }
 
 main().catch((err: unknown) => {

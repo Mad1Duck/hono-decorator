@@ -143,6 +143,24 @@ export interface GenerateFlowOptions {
   listenDurationMs?: number;
   /** Extra variables added to settings.defaultVariables (e.g. env tokens). */
   variables?: FlowKeyValue[];
+  /** Prepend a login/auth step to every generated flow — its extractors
+   *  produce the variables guarded routes reference (e.g. `{{token}}`), so
+   *  generated flows actually run against authenticated APIs instead of
+   *  401-ing everywhere. Body may itself contain `{{vars}}` (username/
+   *  password), which become editable flow variables. */
+  auth?: FlowAuthSpec;
+}
+
+/** A login step prepended to generated flows — see GenerateFlowOptions.auth. */
+export interface FlowAuthSpec {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** Path relative to the flow's baseUrl, e.g. '/v1/auth/login'. */
+  path: string;
+  /** Raw request body (usually JSON) — may contain {{vars}}. */
+  body?: string;
+  /** Extractors: flow variable → JSONPath into the login response,
+   *  e.g. `{ token: 'data.accessToken' }` (`$.` is prefixed if missing). */
+  extract: Record<string, string>;
 }
 
 /* ================= HELPERS ================= */
@@ -163,6 +181,41 @@ function stableId(seed: string): string {
 
 function kv(key: string, value: string, enabled = true): FlowKeyValue {
   return { key, value, enabled };
+}
+
+/** `{{var}}` references inside a string — same charset api-tester interpolates. */
+function templateVars(text: string): string[] {
+  return [...text.matchAll(/\{\{\s*([\w.]+)\s*\}\}/g)].map(m => m[1]!);
+}
+
+/** A login node whose extractors feed `{{token}}` (et al) to guarded routes.
+ *  `idSeed` keeps the node id stable per file so re-exports don't churn. */
+function buildAuthNode(
+  auth: FlowAuthSpec,
+  idSeed: string,
+): { node: ApiTesterFlowNode; usedVars: Set<string> } {
+  const usedVars = new Set<string>();
+  for (const v of templateVars(`${auth.path} ${auth.body ?? ''}`)) usedVars.add(v);
+  const node: ApiTesterFlowNode = {
+    id: stableId(`auth:${idSeed}`),
+    label: `${auth.method} ${auth.path} — auth`,
+    position: { x: 0, y: 0 },
+    config: {
+      type: 'rest',
+      method: auth.method,
+      url: auth.path,
+      headers: auth.body ? [kv('Content-Type', 'application/json')] : [],
+      query: [],
+      ...(auth.body ? { bodyMode: 'raw' as const, body: auth.body } : {}),
+      extractors: Object.entries(auth.extract).map(([variableName, p]) => ({
+        variableName,
+        path: p.startsWith('$') ? p : `$.${p}`,
+      })),
+      assertions: [],
+    },
+    enabled: true,
+  };
+  return { node, usedVars };
 }
 
 /** ':id' / ':id{regex}' route segments → api-tester '{{id}}' interpolation. */
@@ -292,9 +345,9 @@ interface BuiltControllerNodes {
 /** Build the node chain for one controller — CRUD-ordered, linearly edged. */
 function buildControllerNodes(
   ControllerClass: Function,
-  ctx: { wsBase: string; listenDurationMs: number },
+  ctx: { wsBase: string; listenDurationMs: number; auth?: FlowAuthSpec },
 ): BuiltControllerNodes {
-  const { wsBase, listenDurationMs } = ctx;
+  const { wsBase, listenDurationMs, auth } = ctx;
   const routes = HonoRouteBuilder.describe(ControllerClass as any)
     .slice()
     .sort((a, b) => routeOrder(a) - routeOrder(b));
@@ -314,6 +367,14 @@ function buildControllerNodes(
   const usedVars = new Set<string>();
   const nodes: ApiTesterFlowNode[] = [];
   const edges: ApiTesterFlowEdge[] = [];
+
+  // Auth preamble — a login node first, so every guarded route downstream
+  // gets its {{token}} from a real response instead of a blank variable.
+  if (auth) {
+    const { node, usedVars: authVars } = buildAuthNode(auth, ControllerClass.name);
+    nodes.push(node);
+    for (const v of authVars) usedVars.add(v);
+  }
 
   for (const route of routes) {
     const validation = validationMap[route.handlerName];
@@ -446,11 +507,11 @@ export function generateFlowFiles(
   target: Function | Function[],
   options: GenerateFlowOptions = {},
 ): FlowFileResult[] {
-  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [] } = options;
+  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [], auth } = options;
   const wsBase = baseUrl.replace(/^http/, 'ws');
 
   return resolveControllers(target).map(ControllerClass => {
-    const { nodes, edges, usedVars } = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs });
+    const { nodes, edges, usedVars } = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs, auth });
     const produced = new Set(nodes.flatMap(n => n.config.extractors.map(e => e.variableName)));
     const name = ControllerClass.name.replace(/Controller$/, '') || ControllerClass.name;
     return {
@@ -477,7 +538,7 @@ export function generateFlowFile(
   target: Function | Function[],
   options: GenerateFlowOptions = {},
 ): FlowFileResult {
-  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [] } = options;
+  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [], auth } = options;
   const wsBase = baseUrl.replace(/^http/, 'ws');
   const controllers = resolveControllers(target);
 
@@ -487,9 +548,27 @@ export function generateFlowFile(
   const usedVars = new Set<string>();
   const produced = new Set<string>();
 
+  // Single-file auth preamble — one ungrouped login node that every
+  // controller group depends on, so the token exists before any group runs.
+  let authEntry: { node: ApiTesterFlowNode; usedVars: Set<string> } | undefined;
+  if (auth) {
+    authEntry = buildAuthNode(auth, 'app');
+    authEntry.node.position = { x: 0, y: -160 };
+    nodes.push(authEntry.node);
+    for (const v of authEntry.usedVars) usedVars.add(v);
+    for (const e of authEntry.node.config.extractors) produced.add(e.variableName);
+  }
+
   controllers.forEach((ControllerClass, i) => {
     const built = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs });
     if (!built.nodes.length) return;
+    if (authEntry) {
+      edges.push({
+        id: stableId(`edge:${authEntry.node.id}>${built.nodes[0]!.id}`),
+        source: authEntry.node.id,
+        target: built.nodes[0]!.id,
+      });
+    }
 
     const groupId = stableId(`group:${ControllerClass.name}`);
     const name = ControllerClass.name.replace(/Controller$/, '') || ControllerClass.name;
