@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, relative, resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getClassMeta, METADATA_KEYS } from './decorators/metadata';
 import type { ScheduleMetadata } from './decorators/metadata';
@@ -11,7 +11,11 @@ import { OpenAPIGenerator } from './openapi/generator';
 import { generateClientTypes } from './utils/client';
 import { initProject } from './cli-init';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
-import { extractDbSchema, stringifyDbSchema } from './integrations/db-schema';
+import {
+  extractDbSchema, introspectPostgresSchema, normalizeDbSchemaDoc,
+  parsePrismaSchema, readDbSchemaDoc, stringifyDbSchema,
+} from './integrations/db-schema';
+import type { DbSchemaFile } from './integrations/db-schema';
 import type { ProviderDescription } from './core/container';
 
 function formatMermaid(rows: ProviderDescription[]): string {
@@ -70,16 +74,25 @@ const COMMANDS: Record<string, CommandSpec> = {
     ],
   },
   schema: {
-    desc: 'database schema → .schema.yaml (Drizzle tables)',
+    desc: 'database schema → .schema.yaml (any source, Drizzle not required)',
+    arg: '<entry-file|conn-string>',
     noEntryNote: true,
     opts: [
+      ['--from <source>', 'schema source: drizzle | prisma | pg | file\n                     (default: auto-detect from the entry — .ts/.js →\n                     drizzle, .prisma → prisma, .yaml/.json → file,\n                     postgres://… → pg)'],
+      ['--connect <url>', 'connection string for --from pg (alternative to\n                     passing it as the entry)'],
       ['--out <file>', 'output file (default ./db.schema.yaml)'],
       ['--json', 'emit JSON instead of YAML'],
     ],
     examples: [
-      'bunx hono-forge schema ./src/db/schema.ts --out ./db.schema.yaml',
-      '# the entry file should export your pgTable/mysqlTable/sqliteTable objects',
-      '# then in api-tester: Database → Import schema',
+      'bunx hono-forge schema ./src/db/schema.ts',
+      '# entry exports pgTable/mysqlTable/sqliteTable objects → Drizzle introspection',
+      'bunx hono-forge schema ./prisma/schema.prisma',
+      '# parses model blocks — no prisma CLI needed',
+      'bunx hono-forge schema "postgres://user:pass@localhost:5432/db"',
+      '# live information_schema introspection — works with any ORM (needs \'pg\' installed)',
+      'bunx hono-forge schema ./db.schema.yaml --from file',
+      '# normalize a hand-written/external schema doc into canonical form',
+      '# then in api-tester: Database → Import schema (or "Introspect live DB")',
     ],
   },
   flows: {
@@ -230,6 +243,10 @@ interface CliArgs {
   version?: string;
   name?: string;
   importPath?: string;
+  /** `schema` source override: drizzle | prisma | pg | file. */
+  from?: string;
+  /** `schema --from pg` connection string (alternative to positional entry). */
+  connect?: string;
   help: boolean;
 }
 
@@ -249,6 +266,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--version') args.version = rest[++i]!;
     else if (a === '--name') args.name = rest[++i]!;
     else if (a === '--import-path') args.importPath = rest[++i]!;
+    else if (a === '--from') args.from = rest[++i]!;
+    else if (a === '--connect') args.connect = rest[++i]!;
     else if (a === '-h' || a === '--help') args.help = true;
     else if (!a.startsWith('-') && !args.entry) args.entry = a;
     else fail(`Unknown argument: ${a}`);
@@ -293,6 +312,68 @@ function resolveTarget(mod: Record<string, unknown>, exportName?: string): Funct
   return candidates[0]!;
 }
 
+/** Import the entry file, mapping loader failures to actionable CLI errors. */
+async function importEntry(entryPath: string, display: string, command: string): Promise<Record<string, unknown>> {
+  try {
+    return await import(pathToFileURL(entryPath).href) as Record<string, unknown>;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/unknown file extension|ERR_UNKNOWN_FILE_EXTENSION|Cannot find module/i.test(msg)) {
+      fail(`Could not load '${display}'. TypeScript files need Bun — run: bunx hono-forge ${command} ${display}`);
+    }
+    throw err;
+  }
+}
+
+const SCHEMA_SOURCES = ['drizzle', 'prisma', 'pg', 'file'] as const;
+const SCHEMA_FILE_EXTS = new Set(['.yaml', '.yml', '.json']);
+
+/** Build a `DbSchemaFile` from whichever source the entry/--from resolves to. */
+async function buildDbSchema(args: CliArgs, entryPath: string, isConnEntry: boolean): Promise<DbSchemaFile> {
+  const ext = extname(entryPath).toLowerCase();
+  const source: string = args.from ?? (
+    isConnEntry || args.connect ? 'pg'
+    : ext === '.prisma' ? 'prisma'
+    : SCHEMA_FILE_EXTS.has(ext) ? 'file'
+    : 'drizzle');
+  if (!(SCHEMA_SOURCES as readonly string[]).includes(source)) {
+    fail(`Unknown --from '${source}' — use ${SCHEMA_SOURCES.join(' | ')}`);
+  }
+
+  try {
+    switch (source as (typeof SCHEMA_SOURCES)[number]) {
+      case 'pg': {
+        const conn = args.connect ?? (isConnEntry ? args.entry : undefined);
+        if (!conn) {
+          fail(`--from pg needs a connection string — pass 'postgres://…' as the entry or --connect <url>`);
+        }
+        return await introspectPostgresSchema(conn!, { entryFile: join(process.cwd(), 'cli-placeholder.js') });
+      }
+      case 'prisma': {
+        const schema = parsePrismaSchema(await readFile(entryPath, 'utf8'));
+        schema.source = 'prisma';
+        return schema;
+      }
+      case 'file': {
+        const schema = normalizeDbSchemaDoc(await readDbSchemaDoc(entryPath));
+        schema.source ??= 'file';
+        return schema;
+      }
+      case 'drizzle': {
+        const mod = await importEntry(entryPath, args.entry!, args.command!);
+        const schema = extractDbSchema(mod, { entryFile: entryPath });
+        if (!schema.tables.length) {
+          fail(`No Drizzle table exports found in '${args.entry}' — export your pgTable/mysqlTable/sqliteTable objects there,` +
+            ` or use another source: --from prisma <schema.prisma> | 'postgres://…' | --from file <doc>`);
+        }
+        return schema;
+      }
+    }
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -321,24 +402,12 @@ async function main(): Promise<void> {
   }
   if (!args.entry) fail(`Missing <entry-file> — e.g. hono-forge ${args.command} ./src/app.module.ts`);
 
-  const entryPath = resolve(process.cwd(), args.entry);
-  let mod: Record<string, unknown>;
-  try {
-    mod = await import(pathToFileURL(entryPath).href) as Record<string, unknown>;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/unknown file extension|ERR_UNKNOWN_FILE_EXTENSION|Cannot find module/i.test(msg)) {
-      fail(`Could not load '${args.entry}'. TypeScript files need Bun — run: bunx hono-forge ${args.command} ${args.entry}`);
-    }
-    throw err;
-  }
+  // `schema` accepts a conn-string entry (postgres://…) — don't resolve those.
+  const isConnEntry = /^postgres(ql)?:\/\//i.test(args.entry);
+  const entryPath = isConnEntry ? args.entry : resolve(process.cwd(), args.entry);
 
-  // `schema` scans exports for Drizzle tables — not @Module/@Controller classes.
   if (args.command === 'schema') {
-    const schema = extractDbSchema(mod, { entryFile: entryPath });
-    if (schema.tables.length === 0) {
-      fail(`No Drizzle table exports found in '${args.entry}' — export your pgTable/mysqlTable/sqliteTable objects there.`);
-    }
+    const schema = await buildDbSchema(args, entryPath, isConnEntry);
     const out = resolve(process.cwd(), args.out ?? './db.schema.yaml');
     await mkdir(dirname(out), { recursive: true });
     if (args.json) {
@@ -347,9 +416,12 @@ async function main(): Promise<void> {
       await writeFile(out, stringifyDbSchema(schema), 'utf8');
     }
     console.log(`Wrote ${out} — ${schema.tables.length} table(s)` +
-      (schema.dialect ? ` (${schema.dialect})` : ''));
+      (schema.dialect ? ` (${schema.dialect})` : '') +
+      (schema.source ? ` — from ${schema.source}` : ''));
     return;
   }
+
+  const mod = await importEntry(entryPath, args.entry, args.command);
 
   const target = resolveTarget(mod, args.exportName);
 
