@@ -9,13 +9,18 @@ import { container } from './core/container';
 import { parseCron } from './core/cron';
 import { OpenAPIGenerator } from './openapi/generator';
 import { generateClientTypes } from './utils/client';
+import { initProject } from './cli-init';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
 
 interface CommandSpec {
   desc: string;
+  /** Positional arg name — defaults to '<entry-file>' (init uses '<name>'). */
+  arg?: string;
   opts: [flag: string, desc: string][];
   /** Example invocations shown in `<command> --help`. */
   examples: string[];
+  /** Suppress the @Module/@Controller entry-file note (init doesn't take one). */
+  noEntryNote?: boolean;
 }
 
 const COMMON_OPTS: [string, string][] = [
@@ -23,6 +28,17 @@ const COMMON_OPTS: [string, string][] = [
 ];
 
 const COMMANDS: Record<string, CommandSpec> = {
+  init: {
+    desc: 'scaffold a new Bun + hono-forge project',
+    arg: '<name>',
+    noEntryNote: true,
+    opts: [],
+    examples: [
+      'bunx hono-forge init my-api',
+      '# → my-api/ with src/app.module.ts, a sample controller, tsconfig,',
+      '#   package.json — then: cd my-api && bun install && bun run dev',
+    ],
+  },
   flows: {
     desc: 'api-tester .flow.yaml files',
     opts: [
@@ -95,14 +111,19 @@ const COMMANDS: Record<string, CommandSpec> = {
 
 function commandHelp(name: string): string {
   const spec = COMMANDS[name]!;
-  const lines = [`hono-forge ${name} — ${spec.desc}`, '', `Usage:`, `  hono-forge ${name} <entry-file> [options]`, '', `Options:`];
-  for (const [flag, desc] of spec.opts) lines.push(`  ${flag.padEnd(20)} ${desc}`);
-  lines.push(`  ${'-h, --help'.padEnd(20)} show this help`);
+  const lines = [`hono-forge ${name} — ${spec.desc}`, '', `Usage:`, `  hono-forge ${name} ${spec.arg ?? '<entry-file>'} [options]`];
+  if (spec.opts.length) {
+    lines.push('', 'Options:');
+    for (const [flag, desc] of spec.opts) lines.push(`  ${flag.padEnd(20)} ${desc}`);
+    lines.push(`  ${'-h, --help'.padEnd(20)} show this help`);
+  }
   if (spec.examples.length) {
     lines.push('', 'Examples:');
     for (const ex of spec.examples) lines.push(`  ${ex}`);
   }
-  lines.push('', `The entry file must export your @Module class (or @Controller classes).`, `TypeScript entries need Bun: bunx hono-forge ${name} ./src/app.module.ts`);
+  if (!spec.noEntryNote) {
+    lines.push('', `The entry file must export your @Module class (or @Controller classes).`, `TypeScript entries need Bun: bunx hono-forge ${name} ./src/app.module.ts`);
+  }
   return lines.join('\n');
 }
 
@@ -229,6 +250,16 @@ async function main(): Promise<void> {
   }
   // `hono-forge <command> --help` → per-command help
   if (args.help) { console.log(commandHelp(args.command)); return; }
+
+  // init doesn't take an entry file — the positional arg is the project name.
+  if (args.command === 'init') {
+    if (!args.entry) fail('Missing <name> — e.g. hono-forge init my-api');
+    const { dir, files } = await initProject(args.entry);
+    console.log(`Created ${dir}`);
+    for (const f of files) console.log(`  • ${f}`);
+    console.log(`\nNext steps:\n  cd ${args.entry}\n  bun install\n  bun run dev\n\nThen open http://localhost:3000/docs`);
+    return;
+  }
   if (!args.entry) fail(`Missing <entry-file> — e.g. hono-forge ${args.command} ./src/app.module.ts`);
 
   const entryPath = resolve(process.cwd(), args.entry);

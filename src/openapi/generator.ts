@@ -5,6 +5,7 @@ import type { ZodType } from 'zod';
 
 import { METADATA_KEYS } from '../decorators/metadata';
 import type { RouteMetadata, GuardMetadata, OpenAPIMetadata } from '../decorators/metadata';
+import { JWT_AUTH_MIDDLEWARE } from '../decorators/common-middleware';
 
 /* ================= TYPES ================= */
 
@@ -106,6 +107,12 @@ export class OpenAPIGenerator {
       const allSse = (meta[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
       const allWs = (meta[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
       const allChannels = (meta[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, string | ((c: unknown) => string)> | undefined) ?? {};
+      // @JwtAuth is a (marked) middleware, not a guard — detect it here.
+      const classMws = (meta[METADATA_KEYS.MIDDLEWARES] as unknown[] | undefined) ?? [];
+      const allMethodMws = (meta[METADATA_KEYS.METHOD_MIDDLEWARES] as Record<string, unknown[]> | undefined) ?? {};
+      const isJwtAuth = (m: unknown): boolean =>
+        typeof m === 'function' && (m as unknown as Record<symbol, unknown>)[JWT_AUTH_MIDDLEWARE] === true;
+      const classJwtAuth = classMws.some(isJwtAuth);
 
       for (const route of routes) {
         if (route.method === 'all') continue;
@@ -126,8 +133,12 @@ export class OpenAPIGenerator {
         const tags = [...(classOpenApi.tags ?? []), ...(methodMeta.tags ?? [])];
 
         /* --- Security --- */
-        const needsAuth = !isPublic && guards.some(g =>
-          g.name === 'AuthGuard' || g.name === 'RoleGuard' || g.name === 'PermissionGuard'
+        const needsAuth = !isPublic && (
+          guards.some(g =>
+            g.name === 'AuthGuard' || g.name === 'RoleGuard' || g.name === 'PermissionGuard'
+          ) ||
+          classJwtAuth ||
+          (allMethodMws[handlerName] ?? []).some(isJwtAuth)
         );
         if (needsAuth) needsBearerAuth = true;
 

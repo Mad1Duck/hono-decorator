@@ -537,6 +537,48 @@ describe('hono-forge client', () => {
   });
 });
 
+/* ================= CLI init ================= */
+
+describe('hono-forge init', () => {
+  it('scaffolds a runnable project', async () => {
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = await mkdtemp(join(tmpdir(), 'hono-forge-init-'));
+    const cliPath = join(process.cwd(), 'src/cli.ts');
+    try {
+      const proc = Bun.spawnSync(
+        [process.execPath, cliPath, 'init', 'my-api'],
+        { cwd: dir, stdout: 'pipe', stderr: 'pipe' }
+      );
+      expect(proc.exitCode).toBe(0);
+      const appDir = join(dir, 'my-api');
+      for (const f of [
+        'package.json', 'tsconfig.json', 'README.md',
+        'src/index.ts', 'src/app.module.ts',
+        'src/hello.controller.ts', 'src/hello.service.ts',
+      ]) {
+        expect(await Bun.file(join(appDir, f)).exists()).toBe(true);
+      }
+      const pkg = await Bun.file(join(appDir, 'package.json')).json() as { name: string; dependencies: Record<string, string> };
+      expect(pkg.name).toBe('my-api');
+      expect(pkg.dependencies['hono-forge']).toMatch(/^\^5/);
+      const controller = await Bun.file(join(appDir, 'src/hello.controller.ts')).text();
+      expect(controller).toContain('@Controller');
+      expect(controller).toContain('@Validate');
+
+      // second run fails — refuses to clobber a non-empty dir
+      const again = Bun.spawnSync(
+        [process.execPath, cliPath, 'init', 'my-api'],
+        { cwd: dir, stdout: 'pipe', stderr: 'pipe' }
+      );
+      expect(again.exitCode).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 /* ================= CACHE CONTROL / ETAG ================= */
 
 describe('@CacheControl / @ETag', () => {

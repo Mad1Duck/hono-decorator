@@ -39,6 +39,13 @@ export type JwtAuthOptions = Omit<Parameters<typeof jwt>[0], 'alg'> & {
   alg?: Parameters<typeof jwt>[0]['alg'];
 };
 
+/**
+ * Marker stamped on the @JwtAuth middleware fn so the OpenAPI generator can
+ * infer `security: [{ bearerAuth: [] }]` — the middleware is anonymous, so
+ * metadata alone can't tell it apart from user middleware.
+ */
+export const JWT_AUTH_MIDDLEWARE = Symbol.for('hono-forge.jwtAuth');
+
 export function JwtAuth(options: JwtAuthOptions): ClassOrMethodDec {
   const jwtMw = jwt({ ...options, alg: options.alg ?? 'HS256' }) as unknown as HonoMiddlewareFn;
   const mw: HonoMiddlewareFn = async (c: Context, next) => {
@@ -48,5 +55,6 @@ export function JwtAuth(options: JwtAuthOptions): ClassOrMethodDec {
     if (res) return res; // 401 from hono/jwt
     return next();
   };
+  Object.assign(mw, { [JWT_AUTH_MIDDLEWARE]: true });
   return Middleware(mw);
 }

@@ -10,6 +10,7 @@ import {
   Public,
   RequireAuth,
   RequireRole,
+  JwtAuth,
 } from '../src';
 import { ApiDoc, ApiTags, ApiResponse, ApiDeprecated, ApiBody, ApiQuery } from '../src';
 import { OpenAPIGenerator } from '../src';
@@ -220,6 +221,28 @@ describe('OpenAPIGenerator.generate', () => {
       }
       const spec = generate(OpenController);
       expect(spec['components']).toBeUndefined();
+    });
+
+    it('@JwtAuth middleware sets bearerAuth security + 401/403', () => {
+      @Controller('/jwt')
+      class JwtController {
+        @Get() @JwtAuth({ secret: 's' }) mine() { }
+        @Get('/open') @JwtAuth({ secret: 's' }) @Public() open() { }
+      }
+      const spec = generate(JwtController);
+      const secured = op(spec, '/jwt', 'get');
+      expect(
+        (secured['security'] as unknown[])?.some((s) => 'bearerAuth' in (s as object)),
+      ).toBe(true);
+      const responses = secured['responses'] as Record<string, unknown>;
+      expect('401' in responses).toBe(true);
+      expect('403' in responses).toBe(true);
+      // @Public still opts out even alongside the middleware.
+      expect(
+        (op(spec, '/jwt/open', 'get')['security'] as unknown[])?.length ?? 0,
+      ).toBe(0);
+      const schemes = (spec['components'] as Record<string, unknown>)['securitySchemes'] as Record<string, unknown>;
+      expect('bearerAuth' in schemes).toBe(true);
     });
   });
 

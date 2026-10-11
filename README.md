@@ -1015,6 +1015,8 @@ class MeController {
 }
 ```
 
+`@JwtAuth` is reflected in the generated OpenAPI spec — the route gets `security: [{ bearerAuth: [] }]`, `401`/`403` responses, and a `bearerAuth` HTTP security scheme in `components` (so Scalar's **Authorize** button works). `@Public` still opts a route out. The same applies to `@RequireAuth` / `@RequireRole` / permission guards.
+
 ---
 
 ## SSE (Server-Sent Events)
@@ -1926,6 +1928,7 @@ await writeFlowFiles('./flows', AppModule, { baseUrl: 'http://localhost:3000' })
 **CLI** — no script needed:
 
 ```bash
+bunx hono-forge init my-api                        # scaffold a runnable starter project
 bunx hono-forge flows ./src/app.module.ts --out ./flows --base-url http://localhost:3000
 bunx hono-forge flows ./src/app.module.ts --single   # one file, a group per controller
 bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without a server
@@ -1934,6 +1937,8 @@ bunx hono-forge graph ./src/app.module.ts            # DI dependency graph
 bunx hono-forge doctor ./src/app.module.ts           # static wiring check — exit 1 on issues
 bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts  # typed client route map
 ```
+
+`init` writes a runnable project — `app.module.ts`, an example controller/service, `src/index.ts` wiring health + OpenAPI docs + graceful shutdown, `package.json`, `tsconfig.json` (TC39 decorators configured), `README.md`, and `.gitignore`. Then `cd my-api && bun install && bun run dev` serves `/hello`, `/health`, `/openapi.json`, and interactive docs at `/docs`. Every command supports `--help` (or `hono-forge help <command>`) with flag docs and examples.
 
 The `client` command writes a `routes.gen.ts` declaring `interface AppRoutes` — feed it to `createClient<AppRoutes>(baseUrl)` for a fully-typed fetch client. The generated file `import type`s your controllers from the entry file (so they must be exported there), or from `--import-path <module>`. Re-run it as a codegen step whenever routes change — type errors in callers surface immediately.
 
