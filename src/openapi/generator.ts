@@ -6,6 +6,7 @@ import type { ZodType } from 'zod';
 import { METADATA_KEYS } from '../decorators/metadata';
 import type { RouteMetadata, GuardMetadata, OpenAPIMetadata } from '../decorators/metadata';
 import { JWT_AUTH_MIDDLEWARE } from '../decorators/common-middleware';
+import type { SecuritySchemeSpec } from '../decorators/security';
 
 /* ================= TYPES ================= */
 
@@ -87,6 +88,8 @@ export class OpenAPIGenerator {
   ): Record<string, unknown> {
     const paths: Record<string, Record<string, unknown>> = {};
     let needsBearerAuth = false;
+    const allSecuritySchemes: Record<string, SecuritySchemeSpec> = {};
+    const usedSecuritySchemes = new Set<string>();
 
     for (const ControllerClass of controllers) {
       const meta = getMeta(ControllerClass as unknown as Function);
@@ -107,6 +110,9 @@ export class OpenAPIGenerator {
       const allSse = (meta[METADATA_KEYS.SSE_ROUTE] as Record<string, boolean> | undefined) ?? {};
       const allWs = (meta[METADATA_KEYS.WEBSOCKET_ROUTE] as Record<string, boolean> | undefined) ?? {};
       const allChannels = (meta[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, string | ((c: unknown) => string)> | undefined) ?? {};
+      const securityRequirements = (meta[METADATA_KEYS.SECURITY] as Record<string, string[]> | undefined) ?? {};
+      const securitySchemes = (meta[METADATA_KEYS.SECURITY_SCHEMES] as Record<string, SecuritySchemeSpec> | undefined) ?? {};
+      Object.assign(allSecuritySchemes, securitySchemes);
       // @JwtAuth is a (marked) middleware, not a guard — detect it here.
       const classMws = (meta[METADATA_KEYS.MIDDLEWARES] as unknown[] | undefined) ?? [];
       const allMethodMws = (meta[METADATA_KEYS.METHOD_MIDDLEWARES] as Record<string, unknown[]> | undefined) ?? {};
@@ -133,14 +139,25 @@ export class OpenAPIGenerator {
         const tags = [...(classOpenApi.tags ?? []), ...(methodMeta.tags ?? [])];
 
         /* --- Security --- */
-        const needsAuth = !isPublic && (
+        const inferredAuth = !isPublic && (
           guards.some(g =>
             g.name === 'AuthGuard' || g.name === 'RoleGuard' || g.name === 'PermissionGuard'
           ) ||
           classJwtAuth ||
           (allMethodMws[handlerName] ?? []).some(isJwtAuth)
         );
-        if (needsAuth) needsBearerAuth = true;
+        const explicitSecurity = securityRequirements[handlerName];
+        if (inferredAuth) needsBearerAuth = true;
+        if (explicitSecurity) for (const name of explicitSecurity) usedSecuritySchemes.add(name);
+        const security: unknown[] | undefined = isPublic
+          ? []
+          : inferredAuth && explicitSecurity
+            ? [{ bearerAuth: [] }, ...explicitSecurity.map(name => ({ [name]: [] }))]
+            : inferredAuth
+              ? [{ bearerAuth: [] }]
+              : explicitSecurity
+                ? explicitSecurity.map(name => ({ [name]: [] }))
+                : undefined;
 
         /* --- Path parameters (inferred from URL; @Validate/@ApiDoc may refine the schema) + @ApiQuery --- */
         const pathParamNames = extractPathParamNames(honoFullPath);
@@ -180,9 +197,13 @@ export class OpenAPIGenerator {
           responses['200'] = { description: isSse ? 'SSE stream' : isWs ? 'WebSocket upgrade' : 'Success' };
         }
 
-        if (needsAuth) {
+        if (security !== undefined && security.length > 0) {
           responses['401'] = { description: 'Unauthorized' };
-          responses['403'] = { description: 'Forbidden' };
+          if (inferredAuth) responses['403'] = { description: 'Forbidden' };
+        }
+        const timeoutMeta = (meta[METADATA_KEYS.TIMEOUT] as Record<string, number> | undefined)?.[handlerName];
+        if (timeoutMeta !== undefined) {
+          responses['504'] = { description: `Gateway timeout (${timeoutMeta}ms)` };
         }
 
         /* --- Build operation --- */
@@ -195,7 +216,7 @@ export class OpenAPIGenerator {
             : (isSse || isWs ? descriptionPrefix.trim() : undefined),
           tags: tags.length > 0 ? tags : undefined,
           deprecated: methodMeta.deprecated,
-          security: needsAuth ? [{ bearerAuth: [] }] : isPublic ? [] : undefined,
+          security,
           parameters: parameters.length > 0 ? parameters : undefined,
           /* Vendor extensions — ignored by OpenAPI tooling, consumed by smarter
            * clients (e.g. api-tester) to build protocol-aware nodes. */
@@ -216,13 +237,22 @@ export class OpenAPIGenerator {
       }
     }
 
+    const securitySchemes: Record<string, unknown> = {};
+    if (needsBearerAuth) {
+      securitySchemes.bearerAuth = { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' };
+    }
+    for (const name of usedSecuritySchemes) {
+      const spec = allSecuritySchemes[name];
+      if (spec) securitySchemes[name] = spec;
+    }
+
     return compact({
       openapi: '3.1.0',
       info: options.info,
       servers: options.servers,
       paths,
-      components: needsBearerAuth
-        ? { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } } }
+      components: Object.keys(securitySchemes).length > 0
+        ? { securitySchemes }
         : undefined,
     });
   }

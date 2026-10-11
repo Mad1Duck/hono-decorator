@@ -103,4 +103,8 @@ export class HttpException extends Error {
   static serviceUnavailable(message = 'Service unavailable', options?: HttpExceptionOptions): HttpException {
     return new HttpException(503, message, { code: 'SERVICE_UNAVAILABLE', ...options });
   }
+
+  static gatewayTimeout(message = 'Gateway timeout', options?: HttpExceptionOptions): HttpException {
+    return new HttpException(504, message, { code: 'GATEWAY_TIMEOUT', ...options });
+  }
 }

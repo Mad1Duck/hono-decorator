@@ -117,6 +117,63 @@ export function UserAgent(c: Context): string {
   return extractUserAgent(c);
 }
 
+/* ================= COOKIE SET/DELETE ================= */
+
+export interface CookieOptions {
+  path?: string;
+  domain?: string;
+  maxAge?: number;
+  expires?: Date;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
+  partitioned?: boolean;
+}
+
+/** Set a cookie on the response. */
+export function SetCookie(
+  c: Context,
+  name: string,
+  value: string,
+  options: CookieOptions = {}
+): void {
+  c.header(
+    'set-cookie',
+    serializeCookie(name, value, options),
+    { append: true }
+  );
+}
+
+/** Delete a cookie by setting Max-Age=0. */
+export function DeleteCookie(
+  c: Context,
+  name: string,
+  options: Omit<CookieOptions, 'maxAge' | 'expires'> = {}
+): void {
+  c.header(
+    'set-cookie',
+    serializeCookie(name, '', { ...options, maxAge: 0 }),
+    { append: true }
+  );
+}
+
+function serializeCookie(
+  name: string,
+  value: string,
+  options: CookieOptions
+): string {
+  const parts = [`${name}=${encodeURIComponent(value)}`];
+  if (options.path) parts.push(`Path=${options.path}`);
+  if (options.domain) parts.push(`Domain=${options.domain}`);
+  if (options.maxAge !== undefined) parts.push(`Max-Age=${options.maxAge}`);
+  if (options.expires) parts.push(`Expires=${options.expires.toUTCString()}`);
+  if (options.httpOnly) parts.push('HttpOnly');
+  if (options.secure) parts.push('Secure');
+  if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
+  if (options.partitioned) parts.push('Partitioned');
+  return parts.join('; ');
+}
+
 /* ================= COOKIES ================= */
 
 function parseCookies(header: string): Record<string, string> {

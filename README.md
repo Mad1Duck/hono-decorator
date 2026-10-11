@@ -182,6 +182,7 @@ const app = createApp(AppModule, {
   health: { probes: true, checks: { db: () => db.ping() } }, // /health + /health/live + /health/ready
   metrics: true,                                            // GET /metrics (Prometheus)
   openapi: { info: { title: 'My API', version: '1.0.0' } }, // GET /docs + /openapi.json
+  cors: true,                                               // global CORS (hono/cors defaults)
   printRoutes: true,                                        // route table at startup
   shutdown: { timeoutMs: 10_000, onShutdown: async () => stopWorkers() },
 });
@@ -647,6 +648,7 @@ hono-forge exports typed helper functions for common request data — same names
 import {
   Body, Param, Query, Headers, User,
   Ip, Device, UserAgent, Cookie, Cookies,
+  SetCookie, DeleteCookie,
   UploadedFile, UploadedFiles, FormBody,
   Req, Ctx,
 } from 'hono-forge';
@@ -736,6 +738,18 @@ profile(c: Context) {
   const session = Cookie(c, 'session');
   const user    = User<MyUser>(c);
   return { session, user };
+}
+
+@Post('/login')
+login(c: Context) {
+  SetCookie(c, 'session', token, { httpOnly: true, sameSite: 'Strict', maxAge: 86400 });
+  return { ok: true };
+}
+
+@Post('/logout')
+logout(c: Context) {
+  DeleteCookie(c, 'session');
+  return { ok: true };
 }
 ```
 
@@ -1406,7 +1420,7 @@ async fetchExternalData() { /* ... */ }
 async slowOperation() { /* ... */ }
 ```
 
-Throws `HttpException(504)` when exceeded — clients receive a proper `504 Gateway Timeout`.
+Throws `HttpException(504)` when exceeded — clients receive a proper `504 Gateway Timeout`. The generated OpenAPI spec now also documents the `504` response.
 
 ### `@Transform`
 
@@ -1414,6 +1428,22 @@ Throws `HttpException(504)` when exceeded — clients receive a proper `504 Gate
 @Transform((user: User) => ({ id: user.id, name: user.name }))
 getUser() { /* ... */ }
 ```
+
+### `@Serialize(schema)`
+
+Run the handler's return through a Zod schema before it is sent — useful for stripping sensitive/internal fields with `.omit()`/`.pick()` or coercing output shape.
+
+```ts
+const UserView = z.object({ id: z.string(), name: z.string() });
+
+@Get('/me')
+@Serialize(UserView)
+getUser() {
+  return { id: '1', name: 'Ada', passwordHash: '...' };
+}
+```
+
+The response will contain only `{ id, name }`. Validation errors become `400`.
 
 ### `@Cache`
 
@@ -1488,6 +1518,22 @@ oldUsers() { /* never invoked — route always redirects */ }
 ```
 
 `@Header` is repeatable (multiple decorators merge) and applies to responses produced via `c.json`/`c.body`/etc. — a raw `new Response()` bypasses it. `@Redirect` skips the handler entirely (guards/middleware still run).
+
+### `@ApiSecurity` / `@ApiSecurityScheme`
+
+Use these when the auto-detected security (from `@JwtAuth` / `@RequireAuth` / guards) is not enough — e.g. basic auth, an API key, or OAuth2:
+
+```ts
+@Controller('/payments')
+@ApiSecurityScheme('apiKey', { type: 'apiKey', in: 'header', name: 'X-Api-Key' })
+class PaymentsController {
+  @Get('/status')
+  @ApiSecurity('apiKey')
+  status(c: Context) { /* ... */ }
+}
+```
+
+The OpenAPI generator emits the scheme under `components.securitySchemes` and the route-level `security` requirement, so Scalar/Redoc pick it up.
 
 ### `@CacheControl` / `@ETag` — conditional requests
 
@@ -1863,7 +1909,12 @@ container.printGraph([...]);
 //                   ⚠ missing: 'Mailer' is not in providers — resolve() will fail
 ```
 
-Or from the CLI: `bunx hono-forge graph ./src/app.module.ts`.
+Or from the CLI:
+
+```bash
+bunx hono-forge graph ./src/app.module.ts              # human-readable table
+bunx hono-forge graph ./src/app.module.ts --format mermaid  # paste into docs/PR
+```
 
 ### Pluggable logger — `LOGGER` / `registerLogger`
 
@@ -1933,8 +1984,11 @@ bunx hono-forge flows ./src/app.module.ts --out ./flows --base-url http://localh
 bunx hono-forge flows ./src/app.module.ts --single   # one file, a group per controller
 bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without a server
 bunx hono-forge routes ./src/app.module.ts           # route table for CI/debugging
+bunx hono-forge routes ./src/app.module.ts --json    # machine-readable route table
 bunx hono-forge graph ./src/app.module.ts            # DI dependency graph
+bunx hono-forge graph ./src/app.module.ts --format mermaid  # embeddable Mermaid diagram
 bunx hono-forge doctor ./src/app.module.ts           # static wiring check — exit 1 on issues
+bunx hono-forge doctor ./src/app.module.ts --json    # JSON issue list for CI/IDE
 bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts  # typed client route map
 ```
 

@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import type { HonoMiddlewareFn } from '../decorators/metadata';
 import { HonoRouteBuilder } from '../core/route-builder';
 import { OpenAPIGenerator } from '../openapi/generator';
 import type { OpenAPIGenerateOptions, OpenAPIMountOptions } from '../openapi/generator';
@@ -35,6 +37,12 @@ export interface CreateAppOptions {
    * Pass `true` for defaults, or `{ timeoutMs, onShutdown }`.
    */
   shutdown?: boolean | GracefulShutdownOptions;
+  /**
+   * Mount a global CORS middleware. `true` enables generous defaults
+   * (any origin, common methods, preflight); pass hono/cors options for
+   * fine control. Same underlying middleware as `@Cors` decorator.
+   */
+  cors?: boolean | Parameters<typeof cors>[0];
 }
 
 /**
@@ -55,6 +63,10 @@ export interface CreateAppOptions {
  */
 export function createApp(ModuleClass: Function, options: CreateAppOptions = {}): Hono {
   const app = new Hono();
+  if (options.cors) {
+    const corsMw = cors(options.cors === true ? undefined : options.cors) as unknown as HonoMiddlewareFn;
+    app.use('*', corsMw);
+  }
   if (options.metrics) {
     mountMetrics(app, options.metrics === true ? {} : options.metrics);
   }

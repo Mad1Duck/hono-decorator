@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { ContentfulStatusCode, StatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
+import type { ZodType } from 'zod';
 
 import { container } from './container';
 import { defaultCacheAdapter } from './cache';
@@ -605,6 +606,12 @@ export class HonoRouteBuilder {
     const requestLogger = this.config.requestLogger;
     const onRequestStart = this.config.onRequestStart;
 
+    const allTimeout = (meta?.[METADATA_KEYS.TIMEOUT] as Record<string, number> | undefined) ?? {};
+    const timeoutMs = allTimeout[handlerName];
+
+    const allSerialize = (meta?.[METADATA_KEYS.SERIALIZE] as Record<string, ZodType> | undefined) ?? {};
+    const serializeSchema = allSerialize[handlerName] ?? allSerialize['*'];
+
     const allChannelRoutes = (meta?.[METADATA_KEYS.CHANNEL_ROUTE] as Record<string, ChannelRouteMetadata> | undefined) ?? {};
     const channelPattern = allChannelRoutes[handlerName];
     const resolveChannel = (c: Context) =>
@@ -847,7 +854,10 @@ export class HonoRouteBuilder {
             const fn = inst[handlerName];
             if (typeof fn !== 'function') throw new Error(`Handler ${handlerName} not found`);
 
-            const result = await fn.call(inst, c);
+            const raw = await fn.call(inst, c);
+            const result = serializeSchema && raw !== undefined && !(raw instanceof Response)
+              ? await serializeSchema.parseAsync(raw)
+              : raw;
             if (invalidatePatterns) {
               for (const pattern of invalidatePatterns) {
                 await cacheAdapter.deletePattern(pattern);

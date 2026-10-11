@@ -1,5 +1,6 @@
 import { METADATA_KEYS } from './metadata';
 import type { CacheMetadata, HeadersMetadata, IdempotentMetadata, RedirectMetadata, ResponseStatusMetadata } from './metadata';
+
 import { HttpException } from '../core/http-exception';
 import { getMetricsRegistry } from '../utils/metrics';
 
@@ -274,7 +275,10 @@ export function Retry(options: { attempts: number; delay?: number; backoff?: 'ex
 /* ================= TIMEOUT ================= */
 
 export function Timeout(ms: number) {
-  return <T extends AnyFn>(originalFn: T, _context: ClassMethodDecoratorContext): T => {
+  return <T extends AnyFn>(originalFn: T, context: ClassMethodDecoratorContext): T => {
+    const all = (context.metadata[METADATA_KEYS.TIMEOUT] as Record<string, number> | undefined) ?? {};
+    all[String(context.name)] = ms;
+    context.metadata[METADATA_KEYS.TIMEOUT] = all;
     return (async function (this: unknown, ...args: unknown[]) {
       return Promise.race([
         (originalFn as AnyFn).apply(this, args),

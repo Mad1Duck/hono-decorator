@@ -11,6 +11,35 @@ import { OpenAPIGenerator } from './openapi/generator';
 import { generateClientTypes } from './utils/client';
 import { initProject } from './cli-init';
 import { writeFlowFile, writeFlowFiles } from './integrations/api-tester';
+import type { ProviderDescription } from './core/container';
+
+function formatMermaid(rows: ProviderDescription[]): string {
+  const lines = ['graph TD'];
+  const nodes = new Set<string>();
+  for (const r of rows) {
+    const id = r.name.replace(/[^a-zA-Z0-9_]/g, '_');
+    if (!nodes.has(id)) {
+      nodes.add(id);
+      const badge = r.scope !== 'transient' ? ` [${r.scope}]` : '';
+      const label = r.name + badge;
+      lines.push(`    ${id}["${label}"]`);
+    }
+    for (const dep of r.dependencies) {
+      const depId = dep.replace(/[^a-zA-Z0-9_]/g, '_');
+      if (!nodes.has(depId)) {
+        nodes.add(depId);
+        lines.push(`    ${depId}["${dep}"]`);
+      }
+      lines.push(`    ${id} --> ${depId}`);
+    }
+    for (const m of r.missing) {
+      const missId = `missing_${m.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      lines.push(`    ${missId}["⚠ ${m}"]`);
+      lines.push(`    ${id} -.->|missing| ${missId}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 interface CommandSpec {
   desc: string;
@@ -69,25 +98,37 @@ const COMMANDS: Record<string, CommandSpec> = {
   },
   routes: {
     desc: 'print the route table',
-    opts: [...COMMON_OPTS],
+    opts: [
+      ['--json', 'emit JSON instead of the human-readable table'],
+      ...COMMON_OPTS,
+    ],
     examples: [
       'bunx hono-forge routes ./src/app.module.ts',
+      'bunx hono-forge routes ./src/app.module.ts --json',
       '# method / path / handler / guards / middleware / flags — no server needed',
     ],
   },
   graph: {
     desc: 'print the DI dependency graph',
-    opts: [...COMMON_OPTS],
+    opts: [
+      ['--format <text|mermaid>', 'output format (default text) — mermaid is embeddable in docs'],
+      ...COMMON_OPTS,
+    ],
     examples: [
       'bunx hono-forge graph ./src/app.module.ts',
+      'bunx hono-forge graph ./src/app.module.ts --format mermaid',
       '# shows provider scopes, constructor deps, and "missing" warnings',
     ],
   },
   doctor: {
     desc: 'static wiring check — exit 1 on issues (CI guard)',
-    opts: [...COMMON_OPTS],
+    opts: [
+      ['--json', 'emit JSON issue list for CI/IDE integration'],
+      ...COMMON_OPTS,
+    ],
     examples: [
       'bunx hono-forge doctor ./src/app.module.ts',
+      'bunx hono-forge doctor ./src/app.module.ts --json',
       '# CI: fails on missing DI deps, route collisions, bad @Cron,',
       '# and @Interval/@OnBootstrap on @RequestScoped classes',
     ],
@@ -168,6 +209,8 @@ interface CliArgs {
   out?: string;
   baseUrl: string;
   single: boolean;
+  json: boolean;
+  format?: string;
   exportName?: string;
   title?: string;
   version?: string;
@@ -177,7 +220,7 @@ interface CliArgs {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { baseUrl: 'http://localhost:3000', single: false, help: false };
+  const args: CliArgs = { baseUrl: 'http://localhost:3000', single: false, json: false, help: false };
   const rest = [...argv];
   args.command = rest.shift();
   for (let i = 0; i < rest.length; i++) {
@@ -185,6 +228,8 @@ function parseArgs(argv: string[]): CliArgs {
     if (a === '--out') args.out = rest[++i]!;
     else if (a === '--base-url') args.baseUrl = rest[++i]!;
     else if (a === '--single') args.single = true;
+    else if (a === '--json') args.json = true;
+    else if (a === '--format') args.format = rest[++i]!;
     else if (a === '--export') args.exportName = rest[++i]!;
     else if (a === '--title') args.title = rest[++i]!;
     else if (a === '--version') args.version = rest[++i]!;
@@ -278,7 +323,9 @@ async function main(): Promise<void> {
 
   if (args.command === 'routes') {
     for (const t of Array.isArray(target) ? target : [target]) {
-      HonoRouteBuilder.printRoutes(t);
+      const rows = HonoRouteBuilder.describe(t as never);
+      if (args.json) console.log(JSON.stringify(rows, null, 2));
+      else HonoRouteBuilder.printRoutes(t);
     }
     return;
   }
@@ -286,7 +333,13 @@ async function main(): Promise<void> {
   if (args.command === 'graph') {
     for (const t of Array.isArray(target) ? target : [target]) {
       const isModule = getClassMeta(t, METADATA_KEYS.MODULE) !== undefined;
-      container.printGraph(
+      const rows = container.describe(
+        isModule
+          ? [...HonoRouteBuilder.moduleProviders(t), ...HonoRouteBuilder.moduleControllers(t)] as Function[]
+          : [t],
+      );
+      if (args.format === 'mermaid') console.log(formatMermaid(rows));
+      else container.printGraph(
         isModule
           ? [...HonoRouteBuilder.moduleProviders(t), ...HonoRouteBuilder.moduleControllers(t)] as Function[]
           : [t],
@@ -351,6 +404,11 @@ async function main(): Promise<void> {
       }
     }
 
+    if (args.json) {
+      console.log(JSON.stringify({ issues }, null, 2));
+      if (issues.length > 0) process.exitCode = 1;
+      return;
+    }
     if (issues.length === 0) {
       console.log(`✔ no issues — ${controllers.length} controller(s), ${providers.length} provider(s)`);
       return;
