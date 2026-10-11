@@ -1,5 +1,11 @@
 # Changelog
 
+## [5.5.2](https://github.com/Mad1Duck/hono-decorator/compare/v5.5.1...v5.5.2) (2026-10-11)
+
+### Bug Fixes
+
+* CLI bun re-exec, @Idempotent body-hash+scope, doctor injectable resolution, @ChannelAuth ([40c4060](https://github.com/Mad1Duck/hono-decorator/commit/40c4060e86103832c214e6e23048d3b720eb4267)), closes [#1](https://github.com/Mad1Duck/hono-decorator/issues/1) [#2](https://github.com/Mad1Duck/hono-decorator/issues/2) [#3](https://github.com/Mad1Duck/hono-decorator/issues/3)
+
 ## [5.5.1](https://github.com/Mad1Duck/hono-decorator/compare/v5.5.0...v5.5.1) (2026-10-11)
 
 ### Features
