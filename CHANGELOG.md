@@ -1,5 +1,21 @@
 # Changelog
 
+## [5.5.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.3.0...v5.5.0) (2026-10-11)
+
+### Features
+
+* @Serialize, @ApiSecurity, SetCookie, createApp({cors}), CLI outputs ([cba9ad3](https://github.com/Mad1Duck/hono-decorator/commit/cba9ad33b50064ff0a0c608eb44562f96e73cedd))
+* `hono-forge init` scaffolding and `@JwtAuth` OpenAPI security ([0294c3f](https://github.com/Mad1Duck/hono-decorator/commit/0294c3fb4a10351f84b83cab7c4fe8e734b022b1))
+* add request drain, route collision warnings, and `doctor` CLI command ([e4d7374](https://github.com/Mad1Duck/hono-decorator/commit/e4d7374ea240b37838a524c07ef5f9b106dbb37f))
+
+## [6.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.3.0...v6.0.0) (2026-10-11)
+
+### Features
+
+* @Serialize, @ApiSecurity, SetCookie, createApp({cors}), CLI outputs ([cba9ad3](https://github.com/Mad1Duck/hono-decorator/commit/cba9ad33b50064ff0a0c608eb44562f96e73cedd))
+* `hono-forge init` scaffolding and `@JwtAuth` OpenAPI security ([0294c3f](https://github.com/Mad1Duck/hono-decorator/commit/0294c3fb4a10351f84b83cab7c4fe8e734b022b1))
+* add request drain, route collision warnings, and `doctor` CLI command ([e4d7374](https://github.com/Mad1Duck/hono-decorator/commit/e4d7374ea240b37838a524c07ef5f9b106dbb37f))
+
 ## [5.4.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.3.0...v5.4.0) (2026-10-09)
 
 ## [5.3.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.2.0...v5.3.0) (2026-10-09)
