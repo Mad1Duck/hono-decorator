@@ -8,6 +8,7 @@ import {
   type ResponseStatusMetadata,
   type ValidationMetadata,
 } from '../decorators/metadata';
+import { JWT_AUTH_MIDDLEWARE } from '../decorators/common-middleware';
 import { HonoRouteBuilder, type RouteDescription } from '../core/route-builder';
 import { zodToJsonSchema } from '../openapi/generator';
 import { yamlStringify } from '../utils/yaml';
@@ -155,6 +156,10 @@ export interface GenerateFlowOptions {
    *  401-ing everywhere. Body may itself contain `{{vars}}` (username/
    *  password), which become editable flow variables. */
   auth?: FlowAuthSpec;
+  /** Extra query params appended verbatim to WebSocket node URLs —
+   *  `?k=v&k2=v2`. Values may contain {{vars}} (e.g. `token={{token}}` for
+   *  channels that authenticate via the connection URL). */
+  wsQuery?: Record<string, string>;
 }
 
 /** A login step prepended to generated flows — see GenerateFlowOptions.auth. */
@@ -402,6 +407,62 @@ function bodyParts(
 
 /* ================= GENERATOR ================= */
 
+/** `@JwtAuth` produces an anonymous middleware, not a guard — detect it via
+ *  the same JWT_AUTH_MIDDLEWARE marker the OpenAPI generator uses. */
+const isJwtAuthMw = (m: unknown): boolean =>
+  typeof m === 'function' &&
+  (m as unknown as Record<symbol, unknown>)[JWT_AUTH_MIDDLEWARE] === true;
+
+/**
+ * Query params for a realtime node URL. WebSocket nodes can't carry headers
+ * in api-tester (and browsers can't set them either), so auth rides on the
+ * connection URL: `?token={{token}}` for auth-protected/@ChannelAuth routes,
+ * `?name={{name}}` for @ApiQuery-declared params, plus user `wsQuery` pairs.
+ */
+function realtimeQueryPairs(input: {
+  needsAuth: boolean;
+  channelAuth: boolean;
+  openapi?: OpenAPIMetadata;
+  wsQuery?: Record<string, string>;
+  usedVars: Set<string>;
+  varSeeds: Record<string, string>;
+}): [string, string][] {
+  const pairs: [string, string][] = [];
+  const seen = new Set<string>();
+  const push = (k: string, v: string) => {
+    if (seen.has(k)) return;
+    seen.add(k);
+    pairs.push([k, v]);
+  };
+  if (input.needsAuth || input.channelAuth) {
+    push('token', '{{token}}');
+    input.usedVars.add('token');
+  }
+  for (const [name, meta] of Object.entries(input.openapi?.query ?? {})) {
+    push(name, `{{${name}}}`);
+    input.usedVars.add(name);
+    if (input.varSeeds[name] === undefined) {
+      try {
+        input.varSeeds[name] = String(
+          jsonSchemaToExample(zodToJsonSchema(meta.schema), name),
+        );
+      } catch { /* leave unseeded */ }
+    }
+  }
+  for (const [k, v] of Object.entries(input.wsQuery ?? {})) {
+    push(k, v);
+    for (const tv of templateVars(v)) input.usedVars.add(tv);
+  }
+  return pairs;
+}
+
+/** Append `?k=v&…` verbatim — values are templates, so no URL-encoding. */
+function appendQuery(url: string, pairs: [string, string][]): string {
+  if (!pairs.length) return url;
+  const qs = pairs.map(([k, v]) => `${k}=${v}`).join('&');
+  return `${url}${url.includes('?') ? '&' : '?'}${qs}`;
+}
+
 interface BuiltControllerNodes {
   nodes: ApiTesterFlowNode[];
   edges: ApiTesterFlowEdge[];
@@ -415,9 +476,14 @@ interface BuiltControllerNodes {
 /** Build the node chain for one controller — CRUD-ordered, linearly edged. */
 function buildControllerNodes(
   ControllerClass: Function,
-  ctx: { wsBase: string; listenDurationMs: number; auth?: FlowAuthSpec },
+  ctx: {
+    wsBase: string;
+    listenDurationMs: number;
+    auth?: FlowAuthSpec;
+    wsQuery?: Record<string, string>;
+  },
 ): BuiltControllerNodes {
-  const { wsBase, listenDurationMs, auth } = ctx;
+  const { wsBase, listenDurationMs, auth, wsQuery } = ctx;
   const routes = HonoRouteBuilder.describe(ControllerClass as any)
     .slice()
     .sort((a, b) => routeOrder(a) - routeOrder(b));
@@ -430,6 +496,13 @@ function buildControllerNodes(
     getClassMeta<Record<string, ResponseStatusMetadata>>(ControllerClass, METADATA_KEYS.RESPONSE_STATUS) ?? {};
   const serializeMap =
     getClassMeta<Record<string, ZodType>>(ControllerClass, METADATA_KEYS.SERIALIZE) ?? {};
+  const classMws =
+    getClassMeta<unknown[]>(ControllerClass, METADATA_KEYS.MIDDLEWARES) ?? [];
+  const methodMwsMap =
+    getClassMeta<Record<string, unknown[]>>(ControllerClass, METADATA_KEYS.METHOD_MIDDLEWARES) ?? {};
+  const channelAuthMap =
+    getClassMeta<Record<string, unknown>>(ControllerClass, METADATA_KEYS.CHANNEL_AUTH) ?? {};
+  const classJwtAuth = classMws.some(isJwtAuthMw);
 
   // Item-route params that a sibling collection POST can provide via extractor.
   const itemParams = new Set(
@@ -457,7 +530,15 @@ function buildControllerNodes(
     const extractors: FlowExtractor[] = [];
     const assertions: FlowAssertion[] = [];
 
-    if (route.guards.length && !route.isPublic) {
+    // Auth detection covers guards AND @JwtAuth — a middleware decorator,
+    // not a guard, so route.guards alone missed it (#7). Same inference as
+    // the OpenAPI generator's bearerAuth security.
+    const needsAuth =
+      !route.isPublic &&
+      (route.guards.length > 0 ||
+        classJwtAuth ||
+        (methodMwsMap[route.handlerName] ?? []).some(isJwtAuthMw));
+    if (needsAuth) {
       headers.push(kv('Authorization', 'Bearer {{token}}'));
       usedVars.add('token');
     }
@@ -488,7 +569,18 @@ function buildControllerNodes(
     if (route.sse) {
       config = {
         type: 'sse',
-        url: interpolatePath(route.path),
+        // SSE has no query field — declared @ApiQuery params ride on the URL
+        // (auth rides on the Authorization header instead).
+        url: appendQuery(
+          interpolatePath(route.path),
+          realtimeQueryPairs({
+            needsAuth: false,
+            channelAuth: false,
+            openapi,
+            usedVars,
+            varSeeds,
+          }),
+        ),
         pathParams,
         headers,
         listenDurationMs,
@@ -498,7 +590,19 @@ function buildControllerNodes(
     } else if (route.websocket || route.channelRoute) {
       config = {
         type: 'ws',
-        url: `${wsBase}${interpolatePath(route.path)}`,
+        // WS can't carry headers — auth-protected routes get ?token={{token}},
+        // declared @ApiQuery params and user --ws-query pairs join them (#8).
+        url: appendQuery(
+          `${wsBase}${interpolatePath(route.path)}`,
+          realtimeQueryPairs({
+            needsAuth,
+            channelAuth: channelAuthMap[route.handlerName] !== undefined,
+            openapi,
+            wsQuery,
+            usedVars,
+            varSeeds,
+          }),
+        ),
         messagesToSend: [],
         listenDurationMs,
         extractors,
@@ -615,11 +719,11 @@ export function generateFlowFiles(
   target: Function | Function[],
   options: GenerateFlowOptions = {},
 ): FlowFileResult[] {
-  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [], auth } = options;
+  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [], auth, wsQuery } = options;
   const wsBase = baseUrl.replace(/^http/, 'ws');
 
   return resolveControllers(target).map(ControllerClass => {
-    const { nodes, edges, usedVars, varSeeds } = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs, auth });
+    const { nodes, edges, usedVars, varSeeds } = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs, auth, wsQuery });
     const produced = new Set(nodes.flatMap(n => n.config.extractors.map(e => e.variableName)));
     const name = ControllerClass.name.replace(/Controller$/, '') || ControllerClass.name;
     return {
@@ -646,7 +750,7 @@ export function generateFlowFile(
   target: Function | Function[],
   options: GenerateFlowOptions = {},
 ): FlowFileResult {
-  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [], auth } = options;
+  const { baseUrl = 'http://localhost:3000', listenDurationMs = 10_000, variables = [], auth, wsQuery } = options;
   const wsBase = baseUrl.replace(/^http/, 'ws');
   const controllers = resolveControllers(target);
 
@@ -669,7 +773,7 @@ export function generateFlowFile(
   }
 
   controllers.forEach((ControllerClass, i) => {
-    const built = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs });
+    const built = buildControllerNodes(ControllerClass, { wsBase, listenDurationMs, wsQuery });
     if (!built.nodes.length) return;
     if (authEntry) {
       edges.push({

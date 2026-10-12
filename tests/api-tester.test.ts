@@ -4,10 +4,13 @@ import {
   ApiBody,
   ApiQuery,
   ApiResponse,
+  ChannelAuth,
+  ChannelRoute,
   Controller,
   Delete,
   Get,
   Injectable,
+  JwtAuth,
   Module,
   Post,
   Public,
@@ -235,6 +238,78 @@ describe('generateFlowFiles — metadata completeness', () => {
     expect(upload.assertions).toContainEqual({ path: '$status', operator: 'equals', expected: '201' });
     expect(upload.assertions).toContainEqual({ path: '$.id', operator: 'exists', forStatus: 201 });
     expect(upload.assertions).toContainEqual({ path: '$.url', operator: 'exists', forStatus: 201 });
+  });
+});
+
+/* -------- #7/#8: auth detection beyond route.guards + WS query params -------- */
+
+@Controller('/rt')
+@JwtAuth({ secret: 'test-secret' })
+class RealtimeController {
+  @Get('/me') me() { return {}; }
+  @WebSocket('/live') live() {}
+}
+
+@Controller('/rtm')
+class MethodJwtController {
+  @Get('/a') @JwtAuth({ secret: 'test-secret' }) a() { return {}; }
+}
+
+@Controller('/kds')
+class KdsController {
+  @WebSocket('/orders') @Public()
+  @ChannelRoute('orders')
+  @ChannelAuth(() => true)
+  @ApiQuery('outletId', z.string())
+  orders() { return {}; }
+}
+
+describe('generateFlowFiles — @JwtAuth & channel auth (#7/#8)', () => {
+  const [rt] = generateFlowFiles(RealtimeController, { baseUrl: 'http://localhost:4000' });
+
+  test('class-level @JwtAuth middleware emits Bearer {{token}} on REST nodes', () => {
+    const me = rt!.file.nodes.find((n) => n.label.includes('/me'))!
+      .config as ApiTesterRestConfig;
+    expect(me.headers).toContainEqual({
+      key: 'Authorization', value: 'Bearer {{token}}', enabled: true,
+    });
+  });
+
+  test('method-level @JwtAuth also emits the header', () => {
+    const [m] = generateFlowFiles(MethodJwtController);
+    const a = m!.file.nodes.find((n) => n.label.includes('/a'))!
+      .config as ApiTesterRestConfig;
+    expect(a.headers).toContainEqual({
+      key: 'Authorization', value: 'Bearer {{token}}', enabled: true,
+    });
+  });
+
+  test('auth-protected WS node carries ?token={{token}} on the URL', () => {
+    const live = rt!.file.nodes.find((n) => n.label.includes('/live'))!
+      .config as ApiTesterWsConfig;
+    expect(live.url).toBe('ws://localhost:4000/rt/live?token={{token}}');
+  });
+
+  const [kds] = generateFlowFiles(KdsController, {
+    baseUrl: 'http://localhost:4000',
+    wsQuery: { region: 'us-1' },
+  });
+
+  test('@ChannelAuth + @ApiQuery + wsQuery all reach the WS URL', () => {
+    const orders = kds!.file.nodes.find((n) => n.label.includes('/orders'))!
+      .config as ApiTesterWsConfig;
+    expect(orders.url).toBe(
+      'ws://localhost:4000/kds/orders?token={{token}}&outletId={{outletId}}&region=us-1',
+    );
+  });
+
+  test('WS query vars land in defaultVariables — schema-seeded ones enabled', () => {
+    const vars = kds!.file.settings?.defaultVariables ?? [];
+    expect(vars.some((v) => v.key === 'token')).toBe(true);
+    const outlet = vars.find((v) => v.key === 'outletId');
+    expect(outlet?.enabled).toBe(true);
+    expect(outlet?.value).not.toBe('');
+    expect(vars.some((v) => v.key === 'region')).toBe(false); // literal, not a var
   });
 });
 

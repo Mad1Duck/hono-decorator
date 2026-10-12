@@ -1,6 +1,7 @@
 import { METADATA_KEYS } from './metadata';
 import type { ControllerMetadata, RouteMetadata } from './metadata';
 import type { HonoForgeController } from '../core/types';
+import { captureCallSiteFile } from '../utils/callsite';
 
 /* ================= CONTROLLER ================= */
 
@@ -24,6 +25,11 @@ export function Controller(
     };
 
     context.metadata[METADATA_KEYS.CONTROLLER] = metadata;
+    // Record the file this controller is declared in — codegen (`hono-forge
+    // client`) uses it to import the type from its real source file instead of
+    // assuming the entry file re-exports every controller.
+    const file = captureCallSiteFile();
+    if (file) context.metadata[METADATA_KEYS.CONTROLLER_FILE] = file;
   };
 }
 

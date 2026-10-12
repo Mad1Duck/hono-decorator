@@ -2086,7 +2086,7 @@ Two integration levels with [api-tester](https://github.com/Mad1Duck/api-tester)
 
 **1. OpenAPI import (zero config)** — point the importer at `/openapi.json`. The spec carries `x-transport: sse|websocket` and `x-channel` vendor extensions for `@Sse`/`@WebSocket`/`@ChannelRoute` routes, so tools that understand them generate real SSE/WS nodes instead of REST stubs.
 
-**2. Flow files** — `generateFlowFiles` / `writeFlowFiles` turn route metadata into ready-to-run api-tester flows (FlowFile v1). One file per controller, CRUD-ordered and chained: `POST` creates extract `id`, downstream `/:id` routes consume `{{id}}`; `@Validate` or `@ApiBody` schemas become sample bodies (bodies with `z.file()` fields become `form-data` multipart rows; schema-less mutations still get a visible empty raw-body field); `@Validate({query})` and `@ApiQuery` become query params; `@Validate({params})` seeds the editable `{{param}}` variables with schema-derived examples; guarded routes get `Authorization: Bearer {{token}}`; `@Status` (or the lowest documented `@ApiResponse` 2xx) drives status assertions and `@Serialize`/`@ApiResponse` schemas seed `exists` assertions on required response fields; SSE/WS routes become listener nodes.
+**2. Flow files** — `generateFlowFiles` / `writeFlowFiles` turn route metadata into ready-to-run api-tester flows (FlowFile v1). One file per controller, CRUD-ordered and chained: `POST` creates extract `id`, downstream `/:id` routes consume `{{id}}`; `@Validate` or `@ApiBody` schemas become sample bodies (bodies with `z.file()` fields become `form-data` multipart rows; schema-less mutations still get a visible empty raw-body field); `@Validate({query})` and `@ApiQuery` become query params; `@Validate({params})` seeds the editable `{{param}}` variables with schema-derived examples; guarded or `@JwtAuth`-protected routes get `Authorization: Bearer {{token}}` (WS nodes get `?token={{token}}` on the URL instead, since sockets can't carry headers — `@ChannelAuth` routes and declared `@ApiQuery` params likewise land on the URL); `@Status` (or the lowest documented `@ApiResponse` 2xx) drives status assertions and `@Serialize`/`@ApiResponse` schemas seed `exists` assertions on required response fields; SSE/WS routes become listener nodes.
 
 ```ts
 // scripts/export-flows.ts — bun scripts/export-flows.ts
@@ -2110,6 +2110,8 @@ bunx hono-forge flows ./src/app.module.ts \
   --auth 'POST /v1/auth/login' \
   --auth-body '{"username":"{{user}}","password":"{{pass}}"}' \
   --auth-extract 'token=data.accessToken'
+# extra params on WebSocket node URLs (auth-protected WS routes already get ?token={{token}}):
+bunx hono-forge flows ./src/app.module.ts --ws-query 'outletId={{outletId}}&region=us-1'
 bunx hono-forge openapi ./src/app.module.ts --out openapi.json   # spec without a server
 bunx hono-forge routes ./src/app.module.ts           # route table for CI/debugging
 bunx hono-forge routes ./src/app.module.ts --json    # machine-readable route table
@@ -2120,11 +2122,13 @@ bunx hono-forge doctor ./src/app.module.ts --json    # JSON issue list for CI/ID
 bunx hono-forge client ./src/app.module.ts --out src/routes.gen.ts  # typed client route map
 ```
 
-**`flows --auth`** — guarded routes get `Authorization: Bearer {{token}}` headers already, but without a producer that variable is blank and every request 401s. `--auth` prepends a login node whose extractors produce `{{token}}` (or any `var=jsonpath` pairs in `--auth-extract`, default `token=data.accessToken`); `{{vars}}` in `--auth-body` become editable flow variables so credentials stay out of the generated file. In `--single` mode one ungrouped login node is wired into every controller group. Programmatic equivalent: `writeFlowFiles(dir, AppModule, { auth: { method, path, body, extract } })`.
+**`flows --auth`** — guarded routes get `Authorization: Bearer {{token}}` headers already (guards and `@JwtAuth` middleware are both detected), but without a producer that variable is blank and every request 401s. `--auth` prepends a login node whose extractors produce `{{token}}` (or any `var=jsonpath` pairs in `--auth-extract`, default `token=data.accessToken`); `{{vars}}` in `--auth-body` become editable flow variables so credentials stay out of the generated file. In `--single` mode one ungrouped login node is wired into every controller group. Programmatic equivalent: `writeFlowFiles(dir, AppModule, { auth: { method, path, body, extract } })`.
+
+WebSocket nodes can't carry headers, so auth-protected and `@ChannelAuth` routes get `?token={{token}}` on the connection URL instead; `@ApiQuery` params declared on SSE/WS handlers are appended as `?name={{name}}` (schema-seeded editable variables), and `--ws-query 'k=v,…'` / `{ wsQuery }` appends anything else verbatim.
 
 `init` writes a runnable project — `app.module.ts`, an example controller/service, `src/index.ts` wiring health + OpenAPI docs + graceful shutdown, `package.json`, `tsconfig.json` (TC39 decorators configured), `README.md`, and `.gitignore`. Then `cd my-api && bun install && bun run dev` serves `/hello`, `/health`, `/openapi.json`, and interactive docs at `/docs`. Every command supports `--help` (or `hono-forge help <command>`) with flag docs and examples.
 
-The `client` command writes a `routes.gen.ts` declaring `interface AppRoutes` — feed it to `createClient<AppRoutes>(baseUrl)` for a fully-typed fetch client. The generated file `import type`s your controllers from the entry file (so they must be exported there), or from `--import-path <module>`. Re-run it as a codegen step whenever routes change — type errors in callers surface immediately.
+The `client` command writes a `routes.gen.ts` declaring `interface AppRoutes` — feed it to `createClient<AppRoutes>(baseUrl)` for a fully-typed fetch client. The generated file `import type`s each controller **from its own source file** — `@Controller` records where the class is declared, so the output compiles even when controllers aren't re-exported from a single module. `--import-path <module>` opts out and treats one module as a barrel for every controller. Re-run it as a codegen step whenever routes change — type errors in callers surface immediately.
 
 `--export <name>` picks a specific export when the entry file exports several modules. TypeScript entry files require Bun (or a pre-built JS entry under plain Node).
 

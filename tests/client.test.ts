@@ -2,6 +2,7 @@ import { describe, it, expect, afterAll } from 'bun:test';
 import {
   Controller, Get, Post, Public, Param,
   HonoRouteBuilder, createClient, generateClientTypes, ClientRequestError,
+  getClassMeta, METADATA_KEYS,
 } from '../src';
 import type { Context } from 'hono';
 
@@ -31,6 +32,45 @@ describe('generateClientTypes', () => {
   it('uses a custom exportName', () => {
     const src = generateClientTypes({ controllers: [UserCtrl], importPath: './c', exportName: 'MyRoutes' });
     expect(src).toContain('export interface MyRoutes {');
+  });
+
+  it('groups imports per controller specifier — importPath is the fallback', () => {
+    @Controller('/audit')
+    class AuditCtrl {
+      @Get() @Public() list() { return []; }
+    }
+    const specifiers = new Map<Function, string>([
+      [UserCtrl, './modules/users/user.controller'],
+      [AuditCtrl, './modules/audit/audit.controller'],
+    ]);
+    const src = generateClientTypes({
+      controllers: [UserCtrl, AuditCtrl],
+      importPath: './entry',
+      controllerSpecifiers: specifiers,
+    });
+    expect(src).toContain("import type { UserCtrl } from './modules/users/user.controller';");
+    expect(src).toContain("import type { AuditCtrl } from './modules/audit/audit.controller';");
+    expect(src).not.toContain("from './entry'");
+  });
+
+  it('falls back to importPath for controllers without a specifier', () => {
+    const specifiers = new Map<Function, string>([[UserCtrl, './u']]);
+    @Controller('/x')
+    class XCtrl {
+      @Get() @Public() list() { return []; }
+    }
+    const src = generateClientTypes({
+      controllers: [UserCtrl, XCtrl],
+      importPath: './entry',
+      controllerSpecifiers: specifiers,
+    });
+    expect(src).toContain("import type { UserCtrl } from './u';");
+    expect(src).toContain("import type { XCtrl } from './entry';");
+  });
+
+  it('records the declaring file in @Controller metadata (#9)', () => {
+    const file = getClassMeta<string>(UserCtrl, METADATA_KEYS.CONTROLLER_FILE);
+    expect(file?.replace(/\\/g, '/').endsWith('tests/client.test.ts')).toBe(true);
   });
 });
 

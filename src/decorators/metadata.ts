@@ -20,6 +20,9 @@ if (typeof (Symbol as unknown as Record<string, unknown>)['metadata'] === 'undef
 
 export const METADATA_KEYS = {
   CONTROLLER: Symbol.for('hono-forge.controller'),
+  /** Absolute path of the file a @Controller class is declared in — captured
+   *  from the decorator call site; lets codegen import it from its real file. */
+  CONTROLLER_FILE: Symbol.for('hono-forge.controllerFile'),
   ROUTES: Symbol.for('hono-forge.routes'),
   GUARDS: Symbol.for('hono-forge.guards'),
   MIDDLEWARES: Symbol.for('hono-forge.middlewares'),

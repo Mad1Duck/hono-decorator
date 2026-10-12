@@ -105,6 +105,7 @@ const COMMANDS: Record<string, CommandSpec> = {
       ['--auth <method path>', "prepend a login step, e.g. --auth 'POST /v1/auth/login'"],
       ['--auth-body <json>', 'auth request body — {{vars}} become editable variables'],
       ['--auth-extract <v=p,...>', 'auth extractors (default token=data.accessToken)'],
+      ['--ws-query <k=v,...>', "extra params appended to WebSocket node URLs,\n                     e.g. --ws-query 'token={{token}}&outletId={{outletId}}'\n                     (auth-protected WS routes get token={{token}} anyway)"],
       ...COMMON_OPTS,
     ],
     examples: [
@@ -262,6 +263,8 @@ interface CliArgs {
   authBody?: string;
   /** `flows` auth extractors — 'var=jsonpath' pairs, comma-separated. */
   authExtract?: string;
+  /** `flows` — extra 'k=v' pairs appended to WebSocket node URLs. */
+  wsQuery?: string;
   help: boolean;
 }
 
@@ -286,6 +289,7 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--auth') args.auth = rest[++i]!;
     else if (a === '--auth-body') args.authBody = rest[++i]!;
     else if (a === '--auth-extract') args.authExtract = rest[++i]!;
+    else if (a === '--ws-query') args.wsQuery = rest[++i]!;
     else if (a === '-h' || a === '--help') args.help = true;
     else if (!a.startsWith('-') && !args.entry) args.entry = a;
     else fail(`Unknown argument: ${a}`);
@@ -582,12 +586,23 @@ async function main(): Promise<void> {
 
   if (args.command === 'client') {
     const out = resolve(process.cwd(), args.out ?? './routes.gen.ts');
-    // The generated file imports controller types from the entry file by
-    // default — require it to re-export them, or pass --import-path.
+    // Each controller imports from its own source file — @Controller records
+    // it at decoration time, so the generated map compiles even when the
+    // entry file doesn't re-export the controllers. --import-path opts out
+    // and treats one module as the barrel for every controller.
     const importPath = args.importPath ?? relativeImport(dirname(out), entryPath);
-    // The generated file `import type`s each controller by name — warn when
-    // one isn't exported from the entry module or the output won't compile.
-    const unexported = (controllers as Function[]).filter(c => !(c.name in mod));
+    const specifiers = new Map<Function, string>();
+    if (!args.importPath) {
+      for (const c of controllers as Function[]) {
+        const file = getClassMeta<string>(c, METADATA_KEYS.CONTROLLER_FILE);
+        if (file) specifiers.set(c, relativeImport(dirname(out), file));
+      }
+    }
+    // Warn only about controllers with no recorded file that also aren't
+    // exported from the entry module — those imports won't compile.
+    const unexported = (controllers as Function[]).filter(
+      c => !specifiers.has(c) && !(c.name in mod),
+    );
     if (unexported.length) {
       console.warn(`hono-forge: warning — not exported from the entry file: ${unexported.map(c => c.name).join(', ')}`);
       console.warn(`  The generated file imports types from '${importPath}' — export them there or pass --import-path.`);
@@ -595,6 +610,7 @@ async function main(): Promise<void> {
     const code = generateClientTypes({
       controllers: controllers as never,
       importPath,
+      controllerSpecifiers: specifiers,
       exportName: args.name ?? 'AppRoutes',
     });
     await writeFile(out, code, 'utf8');
@@ -617,14 +633,30 @@ async function main(): Promise<void> {
 
   const out = args.out ?? './flows';
   const auth = buildAuthSpec(args);
+  const wsQuery = parseKvArg(args.wsQuery, '--ws-query');
   if (args.single) {
-    const path = await writeFlowFile(out, target, { baseUrl: args.baseUrl, auth });
+    const path = await writeFlowFile(out, target, { baseUrl: args.baseUrl, auth, wsQuery });
     console.log(`Wrote ${path}`);
   } else {
-    const paths = await writeFlowFiles(out, target, { baseUrl: args.baseUrl, auth });
+    const paths = await writeFlowFiles(out, target, { baseUrl: args.baseUrl, auth, wsQuery });
     console.log(`Wrote ${paths.length} flow file(s):`);
     for (const p of paths) console.log(`  • ${p}`);
   }
+}
+
+/** Parse 'k=v,k2=v2' CLI args into a record — undefined when not given. */
+function parseKvArg(
+  raw: string | undefined,
+  flag: string,
+): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const pair of raw.split(',')) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) fail(`${flag} expects k=v pairs — got '${pair}'`);
+    out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+  }
+  return out;
 }
 
 /** Parse `--auth 'POST /path'` + `--auth-body` + `--auth-extract` into a FlowAuthSpec. */
