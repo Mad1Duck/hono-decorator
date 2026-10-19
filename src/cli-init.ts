@@ -78,7 +78,7 @@ function indexTs(name: string): string {
   return `import { createApp } from 'hono-forge';
 import { AppModule } from './app.module';
 
-const app = createApp(AppModule, {
+const app = await createApp(AppModule, {
   health: true,            // GET /health
   openapi: {
     info: { title: '${name}', version: '1.0.0' },

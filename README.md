@@ -178,19 +178,23 @@ One call wires everything a typical app needs — no manual plumbing for health 
 ```ts
 import { createApp } from 'hono-forge';
 
-const app = createApp(AppModule, {
+const app = await createApp(AppModule, {
   health: { probes: true, checks: { db: () => db.ping() } }, // /health + /health/live + /health/ready
   metrics: true,                                            // GET /metrics (Prometheus)
   openapi: { info: { title: 'My API', version: '1.0.0' } }, // GET /docs + /openapi.json
   cors: true,                                               // global CORS (hono/cors defaults)
   printRoutes: true,                                        // route table at startup
   shutdown: { timeoutMs: 10_000, onShutdown: async () => stopWorkers() },
+  // boot: false,    // skip container.boot() — for tests managing lifecycle manually
+  // strictDi: true, // bare `new` on @Injectable classes throws (see Strict DI)
 });
 
 export default app;
 ```
 
-Every option is optional — `createApp(AppModule)` alone is equivalent to `buildModule` + `app.route`. Controllers for the OpenAPI spec are collected from the module automatically; also available as `HonoRouteBuilder.moduleControllers(Module)` for custom wiring.
+`createApp` is async: after wiring routes it awaits `container.boot()`, so `onInit()` lifecycle hooks on resolved singletons run before the app is returned. Pass `boot: false` in tests that drive the container lifecycle themselves.
+
+Every option is optional — `await createApp(AppModule)` alone is equivalent to `buildModule` + `app.route` + `container.boot()`. Controllers for the OpenAPI spec are collected from the module automatically; also available as `HonoRouteBuilder.moduleControllers(Module)` for custom wiring.
 
 ## Auto-discovery
 
@@ -272,6 +276,34 @@ The array index maps to the constructor parameter position.
 container.registerSingleton(Database, new Database(config));
 container.registerFactory(Redis, () => new Redis(process.env.REDIS_URL));
 ```
+
+### Strict DI — keep construction inside the container
+
+`new UserService()` outside the container silently bypasses DI — deps are not injected, singletons are not shared, `onInit`/`onDestroy` hooks are skipped. Strict DI turns that silent drift into a loud error:
+
+```ts
+// Per class — opts in even when the global flag is off
+@Injectable([EmailService], { strict: true })
+class UserService { constructor(private email: EmailService) {} }
+
+new UserService(mail); // throws: DI bypass — resolve via container or use container.construct()
+
+// Globally — every @Injectable class becomes strict
+const app = await createApp(AppModule, { strictDi: true });
+// equivalent: container.strictDi = true;
+```
+
+Instances still come from all the normal paths — `container.resolve()`, constructor injection, factories registered via `registerFactory`. For tests and scripts that genuinely need a standalone instance, use the official escape hatch:
+
+```ts
+const svc = container.construct(UserService, fakeEmail); // deps passed manually
+```
+
+`@Injectable()` without `strict` and `strictDi` unset keeps today's permissive behaviour — strict DI is opt-in.
+
+### `container.construct(cls, ...args)`
+
+Creates an unmanaged instance — the container-approved way to `new` a class under strict DI. Dependencies are caller-provided, not injected; the instance is not tracked (no singleton caching, no lifecycle hooks).
 
 ### Database / external client integration
 
@@ -402,6 +434,8 @@ class SeedService {
 - Only valid on singleton-resolvable providers — `@RequestScoped` classes are rejected (`hono-forge doctor` flags this too)
 
 ### `container.boot()` / `container.shutdown()`
+
+`createApp()` calls `container.boot()` for you (unless `boot: false`). Call it yourself only when wiring apps manually via `buildModule`/`build()`:
 
 ```ts
 // At startup — calls onInit() on all registered singletons that implement OnInit
@@ -543,14 +577,15 @@ return paginate(data, total, { page, limit });
 
 ### `PaginationQuerySchema`
 
-Zod schema for standard `page` / `limit` query params. Use with `@ValidatedQuery`:
+Zod schema for standard `page` / `limit` query params. Use with `ValidatedQuery`:
 
 ```ts
-import { PaginationQuerySchema } from 'hono-forge';
+import { PaginationQuerySchema, ValidatedQuery } from 'hono-forge';
 import type { PaginationQuery } from 'hono-forge';
 
 @Get()
-list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) {
+async list(c: Context) {
+  const q = await ValidatedQuery(c, PaginationQuerySchema); // q: PaginationQuery
   const { page, limit } = q; // page defaults to 1, limit defaults to 20 (max 100)
   const [data, total] = await this.repo.findAndCount({ limit, offset: (page - 1) * limit });
   return paginate(data, total, q);
@@ -569,7 +604,8 @@ const UserListSchema = paginatedSchema(UserSchemas.select);
 @Get()
 @ApiResponse(200, { schema: UserListSchema })
 @ValidateResult(UserListSchema)
-async list(@ValidatedQuery(PaginationQuerySchema) q: PaginationQuery) {
+async list(c: Context) {
+  const q = await ValidatedQuery(c, PaginationQuerySchema);
   const [data, total] = await this.repo.findAndCount(q);
   return paginate(data, total, q);
 }
@@ -716,18 +752,41 @@ class AuditRepo {
 | `await FormBody(c)` | `FormData` | Raw form data |
 | `Req(c)` | `HonoRequest` | Hono request object |
 | `Ctx(c)` | `Context` | Full context (for redirect, set-cookie, etc.) |
+| `await ValidatedBody(c, schema)` | `z.infer<schema>` | `@Validate` cache → schema parse |
+| `await ValidatedQuery(c, schema)` | `z.infer<schema>` | `@Validate` cache → schema parse |
+| `await ValidatedParams(c, schema)` | `z.infer<schema>` | `@Validate` cache → schema parse |
+| `await ValidatedParam(c, 'id', schema)` | `z.infer<schema>` | Single route param through schema |
 
 > `Res(c)` is a deprecated alias of `Ctx(c)` — it returns the `Context`, not a `Response`.
 
 ### Validated shorthands
 
-`ValidatedBody`, `ValidatedQuery`, and `ValidatedParam` are aliases with identical behaviour:
+`ValidatedBody`, `ValidatedQuery`, and `ValidatedParams` are schema-first versions of `Body`/`Query`/`Params` — pass the Zod schema and the return type infers as `z.infer<typeof schema>`, no manual generics. If `@Validate` already parsed the request the cached value is returned (no second parse); otherwise the helper parses through your schema itself, so it works on undecorated routes too:
+
+```ts
+const CreateSchema = z.object({ name: z.string().min(1) });
+
+@Post()
+async create(c: Context) {
+  const body = await ValidatedBody(c, CreateSchema);  // { name: string } — inferred
+  return this.svc.create(body);
+}
+
+@Get('/:id')
+async getOne(c: Context) {
+  const { id } = await ValidatedParams(c, z.object({ id: z.string().uuid() }));
+  const q      = await ValidatedQuery(c, FilterSchema);
+  return this.svc.find(id, q);
+}
+```
+
+`ValidatedParam` parses a single named param:
 
 ```ts
 const id = await ValidatedParam(c, 'id', z.string().uuid());
 ```
 
-Invalid input throws `ZodError` → route builder returns `400 VALIDATION_ERROR` automatically.
+Called without a schema, `ValidatedBody(c)`/`ValidatedQuery(c)`/`ValidatedParams(c)` degrade to the plain helpers (cached value or raw input). Invalid input throws `ZodError` → route builder returns `400 VALIDATION_ERROR` automatically.
 
 ### Cookies
 
@@ -1977,7 +2036,7 @@ metrics path is never self-counted; `options.exclude` skips extra paths.
 `@TrackMetrics` durations also land in the same registry as
 `hono_forge_method_duration_seconds{method,status}` — one scrape covers both.
 
-`createApp` wires it too: `createApp(AppModule, { metrics: true })`.
+`createApp` wires it too: `await createApp(AppModule, { metrics: true })`.
 
 ### Route table — `printRoutes`
 

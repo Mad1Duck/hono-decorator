@@ -64,6 +64,7 @@ export const METADATA_KEYS = {
   REQUEST_SCOPED: Symbol.for('hono-forge.requestScoped'),
   STATELESS: Symbol.for('hono-forge.stateless'),
   INJECT_PARAMS: Symbol.for('hono-forge.injectParams'),
+  DI_STRICT: Symbol.for('hono-forge.diStrict'),
   MODULE: Symbol.for('hono-forge.module'),
 } as const;
 

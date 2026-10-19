@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { HonoMiddlewareFn } from '../decorators/metadata';
 import { HonoRouteBuilder } from '../core/route-builder';
+import { container } from '../core/container';
 import { OpenAPIGenerator } from '../openapi/generator';
 import type { OpenAPIGenerateOptions, OpenAPIMountOptions } from '../openapi/generator';
 import { mountHealth } from './health';
@@ -43,6 +44,18 @@ export interface CreateAppOptions {
    * fine control. Same underlying middleware as `@Cors` decorator.
    */
   cors?: boolean | Parameters<typeof cors>[0];
+  /**
+   * Run `container.boot()` (providers' `onInit` hooks) after wiring —
+   * default true. Set false in tests that manage the container lifecycle
+   * manually.
+   */
+  boot?: boolean;
+  /**
+   * Strict DI — every `@Injectable` class throws when constructed with bare
+   * `new` outside the container. Use `container.construct()` for deliberate
+   * unmanaged instances (tests, scripts).
+   */
+  strictDi?: boolean;
 }
 
 /**
@@ -52,7 +65,7 @@ export interface CreateAppOptions {
  * @example
  * import { createApp } from 'hono-forge';
  *
- * const app = createApp(AppModule, {
+ * const app = await createApp(AppModule, {
  *   health: { checks: { db: () => db.ping() } },
  *   openapi: { info: { title: 'Todo API', version: '1.0.0' } },
  *   printRoutes: true,
@@ -61,7 +74,9 @@ export interface CreateAppOptions {
  *
  * export default app; // → routes, /health, /docs, graceful shutdown
  */
-export function createApp(ModuleClass: Function, options: CreateAppOptions = {}): Hono {
+export async function createApp(ModuleClass: Function, options: CreateAppOptions = {}): Promise<Hono> {
+  if (options.strictDi) container.strictDi = true;
+
   const app = new Hono();
   if (options.cors) {
     const corsMw = cors(options.cors === true ? undefined : options.cors) as unknown as HonoMiddlewareFn;
@@ -92,6 +107,13 @@ export function createApp(ModuleClass: Function, options: CreateAppOptions = {})
 
   if (options.shutdown) {
     gracefulShutdown(options.shutdown === true ? {} : options.shutdown);
+  }
+
+  // Providers' onInit() hooks — a singleton that assumes boot ran shouldn't
+  // behave differently depending on the entrypoint. `boot: false` escapes
+  // for tests that drive the container lifecycle themselves.
+  if (options.boot !== false) {
+    await container.boot();
   }
 
   return app;

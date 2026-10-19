@@ -50,12 +50,37 @@ export interface ProviderDescription {
   resolved: boolean;
 }
 
+/* ================= STRICT DI ================= */
+// Module-scoped construction depth — the container sets this while it (or an
+// approved construct()/factory call) is running a provider constructor.
+// Strict @Injectable classes check it and refuse bare `new` outside the
+// container when strict DI is on.
+
+let constructionDepth = 0;
+
+/** Run `fn` as container-approved construction. */
+function withinConstruction<T>(fn: () => T): T {
+  constructionDepth++;
+  try {
+    return fn();
+  } finally {
+    constructionDepth--;
+  }
+}
+
 /* ================= CONTAINER ================= */
 
 export class Container {
   private singletons = new Map<InjectionToken, unknown>();
   private factories = new Map<InjectionToken, Factory>();
   private resolutionStack: string[] = [];
+
+  /**
+   * Strict DI — when true, every @Injectable class throws if constructed with
+   * bare `new` outside the container. Individual classes can also opt in via
+   * @Injectable(deps, { strict: true }). Escape hatch: container.construct().
+   */
+  strictDi = false;
 
   registerInstance<T>(token: InjectionToken<T>, instance: T): void {
     this.singletons.set(token, instance);
@@ -108,7 +133,7 @@ export class Container {
     if (factory !== undefined) {
       this.resolutionStack.push(targetName);
       try {
-        const instance = factory() as T;
+        const instance = withinConstruction(() => factory() as T);
         this.resolutionStack.pop();
         if (this.isSingleton(target)) this.singletons.set(target, instance);
         return instance;
@@ -145,6 +170,15 @@ export class Container {
     }
   }
 
+  /**
+   * Construct an instance deliberately outside DI resolution — approved for
+   * tests, scripts, and factory internals while strict DI is on. Deps are
+   * passed by the caller, not injected.
+   */
+  construct<T>(target: ConcreteConstructor<T>, ...args: unknown[]): T {
+    return withinConstruction(() => new target(...args));
+  }
+
   private resolveViaConstructor<T>(target: ConcreteConstructor<T>): T {
     try {
       const tokens = this.getInjectTokens(target);
@@ -171,7 +205,7 @@ export class Container {
         }
       });
 
-      return new target(...(dependencies as unknown[]));
+      return withinConstruction(() => new target(...(dependencies as unknown[])));
     } catch (error) {
       if (error instanceof DependencyResolutionError || error instanceof CircularDependencyError) throw error;
       throw new DependencyResolutionError(
@@ -409,6 +443,15 @@ export const container = new Container();
 
 /* ================= DI DECORATORS ================= */
 
+export interface InjectableOptions {
+  /**
+   * Reject `new` on this class even when `container.strictDi` is off.
+   * Combined with the class wrapper below, the check runs at construction
+   * time so it honours a `strictDi` flag enabled later (e.g. by createApp).
+   */
+  strict?: boolean;
+}
+
 /**
  * Mark a class as injectable.
  *
@@ -417,11 +460,51 @@ export const container = new Container();
  * class UserService {
  *   constructor(private db: Database, private logger: Logger) {}
  * }
+ *
+ * `@Injectable(deps, { strict: true })` — or `container.strictDi = true` /
+ * `createApp(AppModule, { strictDi: true })` — makes bare `new` on the class
+ * throw: providers must come from the container. Use `container.construct()`
+ * in tests/scripts for a deliberate unmanaged instance.
  */
-export function Injectable(tokens: InjectionToken[] = []): (value: Function, context: ClassDecoratorContext) => void {
-  return (_value, context) => {
+export function Injectable(
+  tokens: InjectionToken[] = [],
+  options: InjectableOptions = {}
+) {
+  return <C extends abstract new (...args: any[]) => any>(
+    value: C,
+    context: ClassDecoratorContext<C>,
+  ): C => {
     context.metadata[METADATA_KEYS.INJECTABLE] = true;
     context.metadata[METADATA_KEYS.INJECT_PARAMS] = tokens;
+    if (options.strict === true) context.metadata[METADATA_KEYS.DI_STRICT] = true;
+
+    // Wrap in a subclass so the strict-DI check can run per construction —
+    // class decorators can't intercept `new` otherwise. Identity is preserved
+    // (name, Symbol.metadata, statics); instanceof and DI resolution keep the
+    // imported binding consistent everywhere.
+    const Original = value as unknown as new (...args: any[]) => object;
+    const Wrapped = class extends Original {
+      constructor(...args: unknown[]) {
+        const meta = classMeta(Wrapped);
+        if (
+          (meta?.[METADATA_KEYS.DI_STRICT] === true || container.strictDi) &&
+          constructionDepth === 0
+        ) {
+          throw new Error(
+            `[hono-forge] DI bypass: '${Original.name}' was constructed with new() outside the container. ` +
+            `Resolve it via container.resolve(${Original.name}), inject it via @Injectable([...]), ` +
+            `or use container.construct(${Original.name}) for a deliberate unmanaged instance.`
+          );
+        }
+        super(...args);
+      }
+    };
+    // The subclass would read as '' and arity 0 — restore both so token names
+    // and the 'params without tokens' guard keep working.
+    Object.defineProperty(Wrapped, 'name', { value: Original.name, configurable: true });
+    Object.defineProperty(Wrapped, 'length', { value: Original.length, configurable: true });
+    (Wrapped as unknown as { [Symbol.metadata]?: ClassMeta })[Symbol.metadata] = context.metadata;
+    return Wrapped as unknown as C;
   };
 }
 

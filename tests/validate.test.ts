@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
   Body, Controller, createApp, Get, HonoRouteBuilder, Injectable,
   Module, OpenAPIGenerator, Param, Params, Post, Public, Query, Validate,
+  ValidatedBody, ValidatedQuery, ValidatedParams,
 } from '../src';
 
 const CreateUserSchema = z.object({
@@ -50,9 +51,69 @@ class UserController {
   }
 }
 
+/* ================= VALIDATED HELPERS ================= */
+// Routes exercising ValidatedBody/ValidatedQuery/ValidatedParams both with
+// @Validate (cache-first path) and without (schema-fallback path).
+
+@Controller('/validated')
+@Injectable()
+class ValidatedController {
+  @Post()
+  @Public()
+  @Validate({ body: CreateUserSchema })
+  async cachedBody(c: Context) {
+    const body = await ValidatedBody(c, CreateUserSchema);
+    return body;
+  }
+
+  @Post('/fallback')
+  @Public()
+  async fallbackBody(c: Context) {
+    const body = await ValidatedBody(c, CreateUserSchema);
+    return body;
+  }
+
+  @Post('/raw')
+  @Public()
+  async rawBody(c: Context) {
+    return { body: await ValidatedBody(c) };
+  }
+
+  @Get()
+  @Public()
+  @Validate({ query: FilterSchema })
+  async cachedQuery(c: Context) {
+    const q = await ValidatedQuery(c, FilterSchema);
+    return { limit: q.limit, search: q.search ?? null };
+  }
+
+  @Get('/fallback')
+  @Public()
+  async fallbackQuery(c: Context) {
+    const q = await ValidatedQuery(c, FilterSchema);
+    return { limit: q.limit, search: q.search ?? null };
+  }
+
+  @Get('/:id')
+  @Public()
+  @Validate({ params: IdParamSchema })
+  async cachedParams(c: Context) {
+    const { id } = await ValidatedParams(c, IdParamSchema);
+    return { id };
+  }
+
+  @Get('/fallback/:id')
+  @Public()
+  async fallbackParams(c: Context) {
+    const { id } = await ValidatedParams(c, IdParamSchema);
+    return { id };
+  }
+}
+
 const build = () => {
   const app = new Hono();
   app.route('/', HonoRouteBuilder.build(UserController));
+  app.route('/', HonoRouteBuilder.build(ValidatedController));
   return app;
 };
 
@@ -115,6 +176,61 @@ describe('@Validate', () => {
   });
 });
 
+describe('Validated helpers', () => {
+  const post = (path: string, body: unknown) =>
+    build().request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('ValidatedBody returns @Validate-cached data incl. defaults', async () => {
+    const res = await post('/validated', { name: 'Ada', email: 'ada@x.com' });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { role: string }).role).toBe('member');
+  });
+
+  it('ValidatedBody parses through the schema when no @Validate cache exists', async () => {
+    const res = await post('/validated/fallback', { name: 'Bo', email: 'bo@x.com' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { name: string; role: string };
+    expect(body.name).toBe('Bo');
+    expect(body.role).toBe('member'); // schema default applied by fallback parse
+  });
+
+  it('ValidatedBody without schema degrades to raw JSON', async () => {
+    const res = await post('/validated/raw', { anything: 1 });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { body: { anything: number } }).body.anything).toBe(1);
+  });
+
+  it('ValidatedQuery uses the @Validate cache when present', async () => {
+    const res = await build().request('/validated?limit=9');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { limit: number }).limit).toBe(9);
+  });
+
+  it('ValidatedQuery parses through the schema without @Validate', async () => {
+    const res = await build().request('/validated/fallback?limit=4');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { limit: number }).limit).toBe(4);
+  });
+
+  it('ValidatedParams uses the @Validate cache when present', async () => {
+    const id = crypto.randomUUID();
+    const res = await build().request(`/validated/${id}`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { id: string }).id).toBe(id);
+  });
+
+  it('ValidatedParams parses through the schema without @Validate', async () => {
+    const id = crypto.randomUUID();
+    const res = await build().request(`/validated/fallback/${id}`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { id: string }).id).toBe(id);
+  });
+});
+
 /* ================= OPENAPI EMISSION ================= */
 
 describe('@Validate → OpenAPI spec', () => {
@@ -161,9 +277,10 @@ class UserModule {}
 
 describe('createApp', () => {
   it('wires routes + health + openapi in one call', async () => {
-    const app = createApp(UserModule, {
+    const app = await createApp(UserModule, {
       health: true,
       openapi: { info: { title: 'T', version: '1' } },
+      boot: false,
     });
 
     const health = await app.request('/health');
@@ -179,7 +296,7 @@ describe('createApp', () => {
   });
 
   it('works with zero options — plain module build', async () => {
-    const app = createApp(UserModule);
+    const app = await createApp(UserModule, { boot: false });
     const res = await app.request('/users?limit=7');
     expect(res.status).toBe(200);
   });

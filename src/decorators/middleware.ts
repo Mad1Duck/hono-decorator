@@ -1,6 +1,7 @@
 import type { Context, Next } from 'hono';
 import { METADATA_KEYS } from './metadata';
 import type { HonoMiddlewareFn } from './metadata';
+import { container } from '../core/container';
 
 /* ================= TYPES ================= */
 
@@ -13,7 +14,9 @@ type MiddlewareInput = HonoMiddlewareFn | (new () => MiddlewareClass);
 function normalize(middlewares: MiddlewareInput[]): HonoMiddlewareFn[] {
   return middlewares.map((m) => {
     if (isMiddlewareClass(m)) {
-      const instance = new m();
+      // construct() keeps @Injectable middleware classes working under
+      // strictDi — middleware classes are zero-arg by contract anyway.
+      const instance = container.construct(m);
       return instance.use.bind(instance) as HonoMiddlewareFn;
     }
     return m as HonoMiddlewareFn;

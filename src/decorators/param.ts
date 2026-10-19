@@ -255,19 +255,59 @@ export async function FormBody(c: Context): Promise<FormData> {
 }
 
 /* ================= VALIDATED SHORTHANDS ================= */
+// Prefer the @Validate cache when it exists — the decorator already ran the
+// schema, so a re-parse is wasted work — and fall back to parsing with the
+// schema arg on routes without @Validate. The schema is the single source of
+// truth for both type and runtime: no `Body<z.infer<typeof Dto>>(c)` generics.
 
 /**
- * Type-safe Body — same as Body(c, schema) but emphasises validation intent.
+ * Typed body — returns the `@Validate({ body })`-parsed value when present,
+ * otherwise parses `c.req.json()` through `schema`. `T` infers from the schema.
+ * Without a schema it degrades to `Body(c)` (raw JSON or cache).
  *
  * @example
- * const data = await ValidatedBody(c, CreateSchema);  // data is z.infer<typeof CreateSchema>
+ * const data = await ValidatedBody(c, CreateSchema); // data: z.infer<typeof CreateSchema>
  */
-export const ValidatedBody = Body;
+export async function ValidatedBody<T>(c: Context, schema: ZodType<T>): Promise<T>;
+export async function ValidatedBody(c: Context): Promise<unknown>;
+export async function ValidatedBody<T>(c: Context, schema?: ZodType<T>): Promise<T | unknown> {
+  const cached = c.get(VALIDATED_BODY);
+  if (cached !== undefined) return cached as T;
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    throw HttpException.badRequest('Invalid JSON body');
+  }
+  return (schema ? await schema.parseAsync(raw) : raw) as T | unknown;
+}
 
 /**
- * Type-safe Query — same as Query(c, schema).
+ * Typed query — returns the `@Validate({ query })`-parsed value when present,
+ * otherwise parses `c.req.query()` through `schema`. Without a schema it
+ * degrades to `Query(c)` (raw query record or cache).
  */
-export const ValidatedQuery = Query;
+export function ValidatedQuery<T>(c: Context, schema: ZodType<T>): Promise<T>;
+export function ValidatedQuery<T = Record<string, string>>(c: Context): T;
+export function ValidatedQuery<T>(c: Context, schema?: ZodType<T>): T | Promise<T> {
+  const cached = c.get(VALIDATED_QUERY);
+  if (cached !== undefined) return cached as T;
+  return (schema ? schema.parseAsync(c.req.query()) : c.req.query()) as T | Promise<T>;
+}
+
+/**
+ * Typed route params — returns the `@Validate({ params })`-parsed value when
+ * present, otherwise parses `c.req.param()` through `schema`. Params arrive as
+ * strings, so coercion lives in the schema (same as under `@Validate`).
+ * Without a schema it degrades to `Params(c)` (raw params or cache).
+ */
+export function ValidatedParams<T>(c: Context, schema: ZodType<T>): Promise<T>;
+export function ValidatedParams<T = Record<string, string>>(c: Context): T;
+export function ValidatedParams<T>(c: Context, schema?: ZodType<T>): T | Promise<T> {
+  const cached = c.get(VALIDATED_PARAMS);
+  if (cached !== undefined) return cached as T;
+  return (schema ? schema.parseAsync(c.req.param()) : c.req.param()) as T | Promise<T>;
+}
 
 /**
  * Type-safe Param — parses a single route param through a Zod schema.
