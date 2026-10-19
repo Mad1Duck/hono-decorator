@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.0.0](https://github.com/Mad1Duck/hono-decorator/compare/v5.6.2...v6.0.0) (2026-10-19)
+
+### Features
+
+* typed Validated helpers + async createApp with auto-boot and strict DI ([146c779](https://github.com/Mad1Duck/hono-decorator/commit/146c7798114b315d314c65562d52286b92b8a46f))
+
 ## Unreleased
 
 ### ⚠ BREAKING CHANGES

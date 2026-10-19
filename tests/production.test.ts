@@ -562,7 +562,9 @@ describe('hono-forge init', () => {
       }
       const pkg = await Bun.file(join(appDir, 'package.json')).json() as { name: string; dependencies: Record<string, string> };
       expect(pkg.name).toBe('my-api');
-      expect(pkg.dependencies['hono-forge']).toMatch(/^\^5/);
+      // scaffold pins ^<current major> — derive the expectation from our own package.json
+      const selfPkg = await Bun.file(join(process.cwd(), 'package.json')).json() as { version: string };
+      expect(pkg.dependencies['hono-forge']).toBe(`^${selfPkg.version.split('.')[0]}.0.0`);
       const controller = await Bun.file(join(appDir, 'src/hello.controller.ts')).text();
       expect(controller).toContain('@Controller');
       expect(controller).toContain('@Validate');
