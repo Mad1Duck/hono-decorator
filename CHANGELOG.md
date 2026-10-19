@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### ⚠ BREAKING CHANGES
+
+* `createApp` is now async — returns `Promise<Hono>` and awaits `container.boot()` after wiring; call sites must `await createApp(...)` ([146c779](https://github.com/Mad1Duck/hono-decorator/commit/146c7798114b315d314c65562d52286b92b8a46f))
+
+### Features
+
+* schema-first `ValidatedBody` / `ValidatedQuery` / `ValidatedParams` — return type infers as `z.infer<typeof schema>` with no manual generics; cache-first on the `@Validate` context keys, self-sufficient `schema.parseAsync` fallback on undecorated routes, schema-less calls degrade to the raw helpers ([146c779](https://github.com/Mad1Duck/hono-decorator/commit/146c7798114b315d314c65562d52286b92b8a46f))
+* `createApp` auto-boots — `container.boot()` runs automatically so providers' `onInit()` hooks fire under the recommended entrypoint; `boot: false` escape hatch for tests managing the lifecycle manually ([146c779](https://github.com/Mad1Duck/hono-decorator/commit/146c7798114b315d314c65562d52286b92b8a46f))
+* strict DI — `@Injectable(deps, { strict: true })` per class or `createApp(AppModule, { strictDi: true })` / `container.strictDi` globally makes bare `new` on injectable classes throw a "DI bypass" error; `container.construct(cls, ...args)` is the documented escape hatch for tests/scripts ([146c779](https://github.com/Mad1Duck/hono-decorator/commit/146c7798114b315d314c65562d52286b92b8a46f))
+
+### Bug Fixes
+
+* class-based middleware (`@Middleware(Foo)`) instantiated via `container.construct()` so `@Injectable` middleware keeps working under strict DI ([146c779](https://github.com/Mad1Duck/hono-decorator/commit/146c7798114b315d314c65562d52286b92b8a46f))
+
 ## [5.6.2](https://github.com/Mad1Duck/hono-decorator/compare/v5.6.1...v5.6.2) (2026-10-12)
 
 ## [5.6.1](https://github.com/Mad1Duck/hono-decorator/compare/v5.6.0...v5.6.1) (2026-10-11)
